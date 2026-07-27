@@ -1,0 +1,25 @@
+"""Entry point: `python -m relay`."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+
+from .bridge import Bridge
+from .config import Config
+
+
+def main() -> None:
+    cfg = Config.from_env()
+    logging.basicConfig(
+        level=getattr(logging, cfg.log_level, logging.INFO),
+        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+    )
+    try:
+        asyncio.run(Bridge(cfg).run())
+    except KeyboardInterrupt:
+        logging.getLogger("relay").info("Shutting down")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,46 @@
+[Unit]
+Description=OpenHop <-> Telegram relay
+Documentation=https://github.com/openhop-dev
+# Wait for network; if the OpenHop node runs on this same host as a service,
+# add it here too, e.g.:  After=network-online.target openhop-repeater.service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# --- Adjust these three to your install ---
+User=openhop
+Group=openhop
+WorkingDirectory=/opt/openhop-telegram-relay
+
+# Config is read from the .env file in WorkingDirectory (systemd loads it too,
+# so values are available even if python-dotenv isn't installed).
+EnvironmentFile=/opt/openhop-telegram-relay/.env
+
+ExecStart=/opt/openhop-telegram-relay/.venv/bin/python -m relay
+
+# Restart on crash / dropped connection; back off so we don't hammer the API.
+Restart=on-failure
+RestartSec=5
+
+# Send stdout/stderr to the journal (view with: journalctl -u openhop-telegram-relay)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=openhop-relay
+
+# --- Hardening (safe defaults; loosen if your setup needs it) ---
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/openhop-telegram-relay
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

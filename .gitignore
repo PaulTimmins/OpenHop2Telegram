@@ -1,0 +1,23 @@
+# Secrets / local config — never commit these.
+# (.env.example is intentionally NOT ignored; it's the template.)
+.env
+.env.*
+!.env.example
+
+# Virtualenvs
+.venv/
+venv/
+env/
+ENV/
+
+# Python bytecode / build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Editors / OS cruft
+.vscode/
+.idea/
+.DS_Store
