@@ -57,13 +57,32 @@ All configuration is via environment variables (or a `.env` file). See
 
 ### Getting the chat ID
 
-Add the bot to the target chat, send it a message, then:
+Create the group, add your bot to it, send `/start@YourBotName` in the group,
+then run:
 
 ```bash
-curl -s "https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates" | python3 -m json.tool
+python3 scripts/get_chat_id.py
 ```
 
-Look for `message.chat.id`. Group ids are negative (supergroups start with `-100`).
+It reads the token from `.env` (or `TELEGRAM_BOT_TOKEN`, or a command-line
+argument) and prints every chat the bot can see, with ids and types. Put the id
+you want in `TELEGRAM_CHAT_ID`.
+
+Three things that trip people up:
+
+- **Send a command, not a greeting.** Bots have privacy mode on by default, so
+  they only receive commands, @mentions and replies — plain group chatter is
+  invisible and `getUpdates` will look empty. `/start@YourBotName` always
+  arrives. (The relay ignores messages starting with `/`, so it won't be
+  forwarded to the mesh.)
+- **Use a group, not a broadcast channel.** Channels emit `channel_post`
+  updates; this relay only subscribes to `message`, so Telegram → mesh would
+  never fire.
+- **Stop the relay first.** Telegram permits only one `getUpdates` consumer per
+  bot, so the script and a running relay would compete for updates.
+
+Group ids are negative, and supergroup ids start with `-100`. If a group is
+later upgraded to a supergroup its id changes, so `.env` needs updating.
 
 ## Run
 
