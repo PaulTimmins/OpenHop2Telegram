@@ -9,6 +9,7 @@ from typing import Optional
 from meshcore import MeshCore, EventType
 
 from .config import Config
+from .nodes import SeenNodes, describe, type_code
 from .telegram import TelegramClient
 
 log = logging.getLogger("relay.bridge")
@@ -23,6 +24,7 @@ class Bridge:
         self._mesh: Optional[MeshCore] = None
         self._tg: Optional[TelegramClient] = None
         self._channel_idx: int = config.channel_index
+        self._seen = SeenNodes(config.seen_nodes_file)
 
     async def run(self) -> None:
         cfg = self._cfg
@@ -45,11 +47,17 @@ class Bridge:
             cfg.direction,
         )
 
-        # Auto-fetch pulls queued messages off the node and emits *_MSG_RECV events.
-        await self._mesh.start_auto_message_fetching()
-
+        # Subscribe before auto-fetch starts, or messages drained in between
+        # arrive with no handler attached and are lost.
         if cfg.relay_mesh_to_tg:
             self._mesh.subscribe(EventType.CHANNEL_MSG_RECV, self._on_mesh_message)
+
+        if cfg.notify_new_nodes:
+            await self._prime_seen_nodes()
+            self._mesh.subscribe(EventType.NEW_CONTACT, self._on_new_contact)
+
+        # Auto-fetch pulls queued messages off the node and emits *_MSG_RECV events.
+        await self._mesh.start_auto_message_fetching()
 
         tasks = []
         if cfg.relay_tg_to_mesh:
@@ -92,6 +100,68 @@ class Bridge:
             prefix = prefix.hex()
         prefix = str(prefix)
         return prefix[:6] if prefix else ""
+
+    # --- new node announcements -------------------------------------------
+
+    async def _prime_seen_nodes(self) -> None:
+        """Record the node's existing contacts so we only announce genuinely new ones.
+
+        Without this, the first run would announce every contact the node
+        already knows about.
+        """
+        assert self._mesh is not None
+        self._seen.load()
+        first_run = self._seen.is_empty
+
+        contacts = await self._fetch_contacts()
+        added = self._seen.seed(contacts.keys())
+
+        if first_run and added:
+            log.info("Recorded %d existing contact(s) without announcing", added)
+            if self._cfg.announce_seed_summary and self._tg is not None:
+                await self._tg.send_message(
+                    f"\U0001F5C2 Tracking {added} known node(s); "
+                    f"you'll get an alert when a new one appears."
+                )
+        elif added:
+            log.info("Recorded %d contact(s) new to the store without announcing", added)
+
+    async def _fetch_contacts(self) -> dict:
+        """Best-effort fetch of the node's contact list, keyed by public key."""
+        assert self._mesh is not None
+        try:
+            result = await self._mesh.commands.get_contacts()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Could not fetch contacts (%s); starting with none", exc)
+            return {}
+
+        if getattr(result, "type", None) == EventType.ERROR:
+            log.warning("Node returned an error for get_contacts: %s", result.payload)
+            return {}
+
+        payload = result.payload
+        return payload if isinstance(payload, dict) else {}
+
+    async def _on_new_contact(self, event) -> None:
+        contact = event.payload or {}
+        pubkey = contact.get("public_key") or ""
+        if not pubkey:
+            return
+
+        code = type_code(contact)
+        if code not in self._cfg.notify_node_types:
+            log.debug("Ignoring new %s node (filtered out): %s", code, pubkey[:6])
+            # Still record it, so enabling the type later doesn't backfill alerts.
+            self._seen.add(pubkey)
+            return
+
+        if not self._seen.add(pubkey):
+            return  # already announced
+
+        text = describe(contact)
+        log.info("new node -> tg: %s", text.replace("\n", " | "))
+        if self._tg is not None:
+            await self._tg.send_message(text)
 
     # --- telegram -> mesh -------------------------------------------------
 

@@ -14,6 +14,55 @@ except ImportError:  # python-dotenv is optional at runtime
 
 DIRECTIONS = {"both", "mesh_to_tg", "tg_to_mesh"}
 
+# Contact type codes used by MeshCore, plus friendly aliases accepted in config.
+NODE_TYPES = {"NONE", "CLI", "REP", "ROOM", "SENS"}
+NODE_TYPE_ALIASES = {
+    "node": "NONE",
+    "unknown": "NONE",
+    "companion": "CLI",
+    "client": "CLI",
+    "repeater": "REP",
+    "room": "ROOM",
+    "roomserver": "ROOM",
+    "sensor": "SENS",
+}
+
+
+def _parse_bool(value: str, default: bool) -> bool:
+    value = value.strip().lower()
+    if not value:
+        return default
+    return value in ("1", "true", "yes", "on")
+
+
+def _parse_node_types(raw: str) -> frozenset[str]:
+    """Parse NOTIFY_NODE_TYPES into a set of contact type codes."""
+    raw = raw.strip()
+    if not raw or raw.lower() == "all":
+        return frozenset(NODE_TYPES)
+
+    result: set[str] = set()
+    for part in raw.split(","):
+        token = part.strip()
+        if not token:
+            continue
+        code = token.upper()
+        if code in NODE_TYPES:
+            result.add(code)
+            continue
+        alias = NODE_TYPE_ALIASES.get(token.lower().replace(" ", "").replace("_", ""))
+        if alias:
+            result.add(alias)
+        else:
+            raise SystemExit(
+                f"Unknown value {token!r} in NOTIFY_NODE_TYPES. Use 'all' or a "
+                f"comma-separated list of {sorted(NODE_TYPES)} "
+                f"(aliases: {sorted(NODE_TYPE_ALIASES)})."
+            )
+    if not result:
+        raise SystemExit("NOTIFY_NODE_TYPES was set but parsed to nothing.")
+    return frozenset(result)
+
 
 @dataclass(frozen=True)
 class Config:
@@ -27,6 +76,10 @@ class Config:
     tg_to_mesh_prefix: str
     mesh_max_chars: int
     log_level: str
+    notify_new_nodes: bool
+    notify_node_types: frozenset[str]
+    seen_nodes_file: str
+    announce_seed_summary: bool
 
     @property
     def relay_mesh_to_tg(self) -> bool:
@@ -63,4 +116,10 @@ class Config:
             tg_to_mesh_prefix=os.getenv("TG_TO_MESH_PREFIX", "[tg]"),
             mesh_max_chars=int(os.getenv("MESH_MAX_CHARS", "140")),
             log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper(),
+            notify_new_nodes=_parse_bool(os.getenv("NOTIFY_NEW_NODES", ""), True),
+            notify_node_types=_parse_node_types(os.getenv("NOTIFY_NODE_TYPES", "all")),
+            seen_nodes_file=os.getenv("SEEN_NODES_FILE", "seen_nodes.json").strip(),
+            announce_seed_summary=_parse_bool(
+                os.getenv("ANNOUNCE_SEED_SUMMARY", ""), True
+            ),
         )

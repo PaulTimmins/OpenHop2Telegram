@@ -54,6 +54,9 @@ All configuration is via environment variables (or a `.env` file). See
 | `TELEGRAM_CHAT_ID` | Target chat/group/channel id | — |
 | `RELAY_DIRECTION` | `both`, `mesh_to_tg`, or `tg_to_mesh` | `both` |
 | `MESH_MAX_CHARS` | Truncate outgoing mesh messages (LoRa is small) | `140` |
+| `NOTIFY_NEW_NODES` | Alert when a node is seen for the first time | `true` |
+| `NOTIFY_NODE_TYPES` | Which node types to alert on | `all` |
+| `SEEN_NODES_FILE` | Where already-announced nodes are remembered | `seen_nodes.json` |
 
 ### Getting the chat ID
 
@@ -134,6 +137,50 @@ sudo chmod 600 /opt/openhop-telegram-relay/.env
 > On macOS there is no systemd — use a `launchd` plist (or just run `python -m relay`
 > in a `tmux`/`screen` session) instead.
 
+## New node / repeater alerts
+
+When a node the relay hasn't seen before starts advertising, it posts a line to
+the Telegram chat:
+
+```
+🗼 New repeater seen: Hilltop North (a3f9c1)
+📍 44.65012, -63.59551
+```
+
+The location line only appears if the node actually advertises one — nodes with
+location sharing off advertise `0,0`, which is reported as no fix rather than as
+a point in the Atlantic. Companions, room servers and sensors get their own
+label and icon.
+
+Restrict alerts to infrastructure with:
+
+```bash
+NOTIFY_NODE_TYPES=repeater,room
+```
+
+Nodes filtered out this way are still recorded as seen, so turning a type on
+later won't backfill a burst of alerts for nodes already on the mesh.
+
+Announced nodes are remembered in `SEEN_NODES_FILE` (written atomically), so a
+restart doesn't repeat them. **On the very first run the node's existing contact
+list is recorded silently** — otherwise you'd get one alert per node the radio
+already knows. You get a single `🗂 Tracking N known node(s)` summary instead;
+set `ANNOUNCE_SEED_SUMMARY=false` to suppress even that.
+
+Alerts go to Telegram only — nothing is transmitted onto the mesh, so this adds
+no RF traffic.
+
+To deliberately re-announce everything, delete the file:
+
+```bash
+rm seen_nodes.json
+```
+
+> Detection uses the node's `NEW_CONTACT` push, which fires when an advert
+> arrives from a node not already in its contact list. A node that never
+> advertises within range won't be seen — this reports what your radio hears,
+> not the whole mesh.
+
 ## How it works
 
 - **Connection** — `MeshCore.create_tcp(host, port)` opens the companion session.
@@ -145,6 +192,8 @@ sudo chmod 600 /opt/openhop-telegram-relay/.env
 - **Telegram → mesh** — long-polls `getUpdates`; text messages in the configured
   chat are sent with `commands.send_chan_msg(idx, text)`. Bot commands
   (`/…`) are ignored, and only the configured chat is relayed.
+- **New nodes** — seeds a seen-set from `commands.get_contacts()`, then
+  subscribes to `EventType.NEW_CONTACT` and announces first sightings.
 
 ## Notes & limits
 

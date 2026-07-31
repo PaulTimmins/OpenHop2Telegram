@@ -34,6 +34,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
+# Must stay writable: the relay persists SEEN_NODES_FILE (which nodes have
+# already been announced) here, relative to WorkingDirectory.
 ReadWritePaths=/opt/openhop-telegram-relay
 ProtectControlGroups=true
 ProtectKernelModules=true

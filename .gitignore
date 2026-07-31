@@ -4,6 +4,9 @@
 .env.*
 !.env.example
 
+# Runtime state (which nodes have already been announced)
+seen_nodes.json
+
 # Virtualenvs
 .venv/
 venv/
