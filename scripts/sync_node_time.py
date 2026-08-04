@@ -201,6 +201,24 @@ async def run(args: argparse.Namespace) -> int:
         await mesh.start_auto_message_fetching()
         # Populates the contact cache that name lookups rely on.
         await mesh.ensure_contacts()
+        contacts = getattr(mesh, "contacts", None)
+        if not isinstance(contacts, dict) or not contacts:
+            # Retry explicitly; ensure_contacts() can no-op if it thinks the
+            # cache is fresh.
+            result = await mesh.commands.get_contacts()
+            payload = getattr(result, "payload", None)
+            contacts = payload if isinstance(payload, dict) else {}
+
+        if contacts:
+            log.info("Node knows %d contact(s)", len(contacts))
+        else:
+            log.warning(
+                "This node reports no contacts. Nodes can only be reached by name "
+                "or key prefix if the radio knows them, so every lookup will "
+                "fail — check that %s:%s is the companion endpoint you meant.",
+                host,
+                port,
+            )
 
         collector = (
             None

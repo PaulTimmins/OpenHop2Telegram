@@ -37,6 +37,13 @@ _CLOCK_RE = re.compile(
 # The reply to a rejected `time` command.
 BACKWARDS_ERROR = "clock cannot go backwards"
 
+# A key prefix must be hex, and whole bytes.
+_HEX_RE = re.compile(r"(?:[0-9a-fA-F]{2})+")
+
+# Full public keys are 32 bytes. Anything shorter is a prefix, which only works
+# if it matches a contact the node already knows — it can't be used directly.
+_FULL_KEY_CHARS = 64
+
 
 class TimeSyncError(Exception):
     """A node could not be queried or corrected."""
@@ -69,6 +76,12 @@ class NodeSpec:
         pubkey = str(raw.get("pubkey", "")).strip()
         if not name and not pubkey:
             raise TimeSyncError("each node needs a 'name' or a 'pubkey'")
+        if pubkey and not _HEX_RE.fullmatch(pubkey):
+            raise TimeSyncError(
+                f"pubkey {pubkey!r} is not a hex key prefix. Use \"name\" for an "
+                f"advertised node name, or \"pubkey\" for hex digits like "
+                f"\"a3f9c1\" (an even number of them)"
+            )
         return cls(
             name=name,
             password=str(raw.get("password", "")),
@@ -328,8 +341,21 @@ class NodeTimeSync:
                     contact = self._contact_for(found[0])
                     if contact is not None:
                         return contact
-            # Fall back to the raw key; the library accepts a hex string.
-            return spec.pubkey
+                    # Known key, but the node can't reach it. Still usable
+                    # directly if the store gave us the whole thing.
+                    if len(found[0]) == _FULL_KEY_CHARS:
+                        return found[0]
+
+            if len(spec.pubkey) == _FULL_KEY_CHARS:
+                # A whole key needs no contact entry; the library takes it as-is.
+                return spec.pubkey
+
+            raise TimeSyncError(
+                f"key prefix {spec.pubkey!r} matches no contact on the node "
+                f"({self._contact_count()} known). A prefix only works for a "
+                f"node the radio already knows — give the full 64-character key, "
+                f"or check --host/--port point at the right companion endpoint"
+            )
 
         contact = self._mesh.get_contact_by_name(spec.name)
         if contact:
@@ -345,16 +371,37 @@ class NodeTimeSync:
                 if contact is not None:
                     log.debug("%s: resolved via the node store", spec.name)
                     return contact
+                if len(pubkey) == _FULL_KEY_CHARS:
+                    # The store knows the whole key, so we can address it even
+                    # though this node has no contact entry for it.
+                    log.debug("%s: using full key from the node store", spec.name)
+                    return pubkey
                 raise TimeSyncError(
-                    f"{spec.name!r} is in the node store ({pubkey[:12]}) but not in "
-                    f"the node's contact list, so it can't be reached"
+                    f"{spec.name!r} is in the node store ({pubkey[:12]}) but not "
+                    f"among this node's {self._contact_count()} contact(s)"
+                    f"{self._endpoint_hint()}"
                 )
 
         raise TimeSyncError(
-            f"no contact named {spec.name!r} on the node "
-            f"(names must match the advertised name exactly; "
-            f"run scripts/list_nodes.py to see what's known)"
+            f"no contact named {spec.name!r} among this node's "
+            f"{self._contact_count()} contact(s). Names must match the advertised "
+            f"name exactly — run scripts/list_nodes.py to see what's known"
+            f"{self._endpoint_hint()}"
         )
+
+    def _contact_count(self) -> int:
+        contacts = getattr(self._mesh, "contacts", None)
+        return len(contacts) if isinstance(contacts, dict) else 0
+
+    def _endpoint_hint(self) -> str:
+        """Point at the likely cause when the node knows nobody at all."""
+        if self._contact_count() == 0:
+            return (
+                ". This node reported no contacts at all, which usually means "
+                "--host/--port point at a different companion endpoint than the "
+                "one whose nodes you configured"
+            )
+        return ""
 
     async def _login(self, contact: Any, password: str, label: str) -> None:
         try:

@@ -201,24 +201,31 @@ class MetricsCollector:
             }
         )
 
-        status = await self._request(mesh, "req_status_sync", contact, label)
-        if isinstance(status, dict):
-            row["status_ok"] = "true"
-            for src, col in STATUS_COLUMNS.items():
-                value = status.get(src)
-                if value is not None:
-                    row[col] = value
+        try:
+            status = await self._request(mesh, "req_status_sync", contact, label)
+            if isinstance(status, dict):
+                row["status_ok"] = "true"
+                for src, col in STATUS_COLUMNS.items():
+                    value = status.get(src)
+                    if value is not None:
+                        row[col] = value
 
-        telemetry = await self._request(mesh, "req_telemetry_sync", contact, label)
-        if isinstance(telemetry, dict):
-            lpp = telemetry.get("lpp")
-            row["telemetry_ok"] = "true"
-            row["telemetry_json"] = json.dumps(lpp, separators=(",", ":"))
-            row.update(flatten_telemetry(lpp))
+            telemetry = await self._request(mesh, "req_telemetry_sync", contact, label)
+            # req_telemetry_sync hands back the LPP list itself; older/other
+            # versions wrap it in {"lpp": [...]}. Accept either.
+            lpp = telemetry.get("lpp") if isinstance(telemetry, dict) else telemetry
+            if lpp:
+                row["telemetry_ok"] = "true"
+                row["telemetry_json"] = json.dumps(lpp, separators=(",", ":"))
+                row.update(flatten_telemetry(lpp))
+        except Exception:  # noqa: BLE001
+            # A row with gaps is still a usable data point; losing the sample
+            # entirely is not. Never let a parse surprise cost us the write.
+            log.exception("%s: metrics collection failed part-way", label)
+        finally:
+            row["charge_state"] = charge_state(_as_float(row.get("current_a")))
+            self._writer.write(row)
 
-        row["charge_state"] = charge_state(_as_float(row.get("current_a")))
-
-        self._writer.write(row)
         log.info(
             "%s: metrics bat=%smV temp=%s charge=%s (status=%s telemetry=%s)",
             label,
@@ -246,10 +253,29 @@ class MetricsCollector:
         except Exception as exc:  # noqa: BLE001 - a silent node is normal
             log.debug("%s: %s failed: %s", label, method, exc)
             return None
-        if result is None or getattr(result, "type", None) == EventType.ERROR:
-            log.debug("%s: %s returned no usable payload", label, method)
+        return self._payload_of(result, label, method)
+
+    @staticmethod
+    def _payload_of(result: Any, label: str, method: str) -> Any:
+        """Normalise what a command handed back.
+
+        The *_sync request helpers return their payload directly — a dict for
+        status, the LPP list for telemetry — while most other commands return an
+        Event wrapping one. Accept either rather than assuming.
+        """
+        if result is None:
+            log.debug("%s: %s returned nothing", label, method)
             return None
-        return result.payload
+        if getattr(result, "type", None) == EventType.ERROR:
+            log.debug("%s: %s reported an error: %s", label, method, result.payload)
+            return None
+        payload = getattr(result, "payload", None)
+        if payload is not None:
+            return payload
+        if isinstance(result, (dict, list)):
+            return result
+        log.debug("%s: %s gave an unusable %s", label, method, type(result).__name__)
+        return None
 
     @staticmethod
     def _pubkey(contact: Any) -> str:
