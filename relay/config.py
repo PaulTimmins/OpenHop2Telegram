@@ -85,6 +85,11 @@ class Config:
     healthcheck_interval: float
     notify_connection_events: bool
     lock_dir: str
+    # Endpoint the maintenance scripts use. Defaults to the relay's, but can
+    # point somewhere else (a second companion port, a proxy, another node) so
+    # the scripts don't share the relay's message queue.
+    timesync_host: str
+    timesync_port: int
 
     @property
     def relay_mesh_to_tg(self) -> bool:
@@ -134,4 +139,12 @@ class Config:
                 os.getenv("NOTIFY_CONNECTION_EVENTS", ""), True
             ),
             lock_dir=os.getenv("LOCK_DIR", ".").strip() or ".",
+            timesync_host=(
+                os.getenv("TIMESYNC_HOST", "").strip()
+                or os.getenv("OPENHOP_HOST", "127.0.0.1").strip()
+            ),
+            timesync_port=int(
+                os.getenv("TIMESYNC_PORT", "").strip()
+                or os.getenv("OPENHOP_PORT", "4000")
+            ),
         )

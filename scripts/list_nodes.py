@@ -48,6 +48,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="emit a time_sync.json 'nodes' block for every node found",
     )
+    p.add_argument(
+        "--host",
+        default=None,
+        help="companion host (default: TIMESYNC_HOST, else OPENHOP_HOST)",
+    )
+    p.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="companion port (default: TIMESYNC_PORT, else OPENHOP_PORT)",
+    )
     p.add_argument("--log-level", default="WARNING")
     return p.parse_args()
 
@@ -64,12 +75,12 @@ def ago(epoch) -> str:
     return f"{delta}s ago"
 
 
-async def live_contacts(cfg: Config) -> dict:
+async def live_contacts(host: str, port: int) -> dict:
     """Fetch the node's contact list, keyed by public key."""
     from meshcore import MeshCore
 
-    log.info("Connecting to %s:%s", cfg.openhop_host, cfg.openhop_port)
-    mesh = await MeshCore.create_tcp(cfg.openhop_host, cfg.openhop_port)
+    log.info("Connecting to %s:%s", host, port)
+    mesh = await MeshCore.create_tcp(host, port)
     try:
         await mesh.ensure_contacts()
         contacts = getattr(mesh, "contacts", None)
@@ -202,7 +213,9 @@ async def run(args: argparse.Namespace) -> int:
     contacts: dict = {}
     if not args.offline:
         try:
-            contacts = await live_contacts(cfg)
+            contacts = await live_contacts(
+                args.host or cfg.timesync_host, args.port or cfg.timesync_port
+            )
         except Exception as exc:  # noqa: BLE001
             print(
                 f"Could not reach the node ({exc}); showing the store only.",

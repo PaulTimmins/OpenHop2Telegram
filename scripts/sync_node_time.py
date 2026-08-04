@@ -81,18 +81,29 @@ def parse_args() -> argparse.Namespace:
         help="path to the relay's node store (default: SEEN_NODES_FILE)",
     )
     p.add_argument(
+        "--host",
+        default=None,
+        help="companion host to use (default: TIMESYNC_HOST, else OPENHOP_HOST)",
+    )
+    p.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="companion port to use (default: TIMESYNC_PORT, else OPENHOP_PORT)",
+    )
+    p.add_argument(
+        "--pause",
+        action="store_true",
+        help="ask a running relay to release the node first, and wait for it. "
+        "Needed only when sharing one companion endpoint with the relay, since "
+        "both would otherwise drain the same message queue.",
+    )
+    p.add_argument(
         "--pause-timeout",
         type=float,
         default=90.0,
-        help="seconds to wait for a running relay to release the node "
+        help="with --pause, seconds to wait for the relay to release "
         "(default: 90)",
-    )
-    p.add_argument(
-        "--no-pause",
-        action="store_true",
-        help="don't coordinate with the relay. Both would then drain the node's "
-        "message queue and steal each other's replies — only safe when the "
-        "relay is stopped.",
     )
     p.add_argument("--log-level", default="INFO")
     return p.parse_args()
@@ -157,16 +168,27 @@ async def run(args: argparse.Namespace) -> int:
         log.info("No nodes configured; nothing to do.")
         return 0
 
+    host = args.host or cfg.timesync_host
+    port = args.port or cfg.timesync_port
+
     coord = Coordinator(cfg.lock_dir)
     paused = False
-    if not args.no_pause:
+    if args.pause:
         paused = await acquire_node(coord, args.pause_timeout)
+    elif (host, port) == (cfg.openhop_host, cfg.openhop_port) and coord.relay_pid():
+        # Same endpoint as a running relay: both will pop messages off the node,
+        # so each can consume replies meant for the other.
+        log.warning(
+            "A relay is running on %s:%s too. Both will drain the node's message "
+            "queue, so replies can go to the wrong one. Use --pause, or point "
+            "this at its own endpoint with --host/--port or TIMESYNC_HOST/PORT.",
+            host,
+            port,
+        )
 
     try:
-        log.info(
-            "Connecting to OpenHop at %s:%s ...", cfg.openhop_host, cfg.openhop_port
-        )
-        mesh = await MeshCore.create_tcp(cfg.openhop_host, cfg.openhop_port)
+        log.info("Connecting to OpenHop at %s:%s ...", host, port)
+        mesh = await MeshCore.create_tcp(host, port)
     except Exception:
         # Always hand the node back, even if we never got on it.
         if paused:
