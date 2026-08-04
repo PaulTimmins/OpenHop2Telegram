@@ -15,6 +15,11 @@ time_sync.json
 metrics.csv
 *.csv
 
+# Coordination handshake files
+relay.pid
+mesh.pause
+relay.released
+
 # Virtualenvs
 .venv/
 venv/

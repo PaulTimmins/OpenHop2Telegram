@@ -27,6 +27,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from meshcore import MeshCore  # noqa: E402
 
 from relay.config import Config  # noqa: E402
+from relay.coordination import Coordinator  # noqa: E402
 from relay.metrics import MetricsCollector, MetricsWriter  # noqa: E402
 from relay.nodes import SeenNodes  # noqa: E402
 from relay.telegram import TelegramClient  # noqa: E402
@@ -79,8 +80,55 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="path to the relay's node store (default: SEEN_NODES_FILE)",
     )
+    p.add_argument(
+        "--pause-timeout",
+        type=float,
+        default=90.0,
+        help="seconds to wait for a running relay to release the node "
+        "(default: 90)",
+    )
+    p.add_argument(
+        "--no-pause",
+        action="store_true",
+        help="don't coordinate with the relay. Both would then drain the node's "
+        "message queue and steal each other's replies — only safe when the "
+        "relay is stopped.",
+    )
     p.add_argument("--log-level", default="INFO")
     return p.parse_args()
+
+
+async def acquire_node(coord: Coordinator, timeout: float) -> bool:
+    """Ask a running relay to release the node. True if we paused it.
+
+    A companion session is effectively exclusive: messages are popped off the
+    device, so two clients split the queue and silently consume each other's
+    replies. Rather than sleeping and hoping, wait for the relay to confirm it
+    has actually disconnected.
+    """
+    pid = coord.relay_pid()
+    if pid is None:
+        log.info("No relay holding the node; proceeding directly")
+        return False
+
+    log.info("Relay running (pid %d); asking it to release the node", pid)
+    coord.request_pause()
+
+    waited = 0.0
+    step = 0.5
+    while waited < timeout:
+        if coord.relay_has_released():
+            log.info("Relay released the node after %.1fs", waited)
+            return True
+        await asyncio.sleep(step)
+        waited += step
+
+    coord.release_request()
+    raise SystemExit(
+        f"Relay (pid {pid}) did not release the node within {timeout:.0f}s. "
+        f"Nothing was changed. Stop the relay and retry, or pass --no-pause if "
+        f"you know it isn't connected."
+    )
 
 
 def load_sync_config(path: str) -> SyncConfig:
@@ -104,14 +152,26 @@ async def run(args: argparse.Namespace) -> int:
     cfg = Config.from_env()
     sync_cfg = load_sync_config(args.config)
 
-    if not sync_cfg.nodes:
+    # An empty list is still valid when discovered nodes are being sampled.
+    if not sync_cfg.nodes and not sync_cfg.metrics_for_known_nodes:
         log.info("No nodes configured; nothing to do.")
         return 0
 
-    log.info(
-        "Connecting to OpenHop at %s:%s ...", cfg.openhop_host, cfg.openhop_port
-    )
-    mesh = await MeshCore.create_tcp(cfg.openhop_host, cfg.openhop_port)
+    coord = Coordinator(cfg.lock_dir)
+    paused = False
+    if not args.no_pause:
+        paused = await acquire_node(coord, args.pause_timeout)
+
+    try:
+        log.info(
+            "Connecting to OpenHop at %s:%s ...", cfg.openhop_host, cfg.openhop_port
+        )
+        mesh = await MeshCore.create_tcp(cfg.openhop_host, cfg.openhop_port)
+    except Exception:
+        # Always hand the node back, even if we never got on it.
+        if paused:
+            coord.release_request()
+        raise
 
     try:
         # Command replies arrive as messages, so they only reach us while
@@ -145,7 +205,14 @@ async def run(args: argparse.Namespace) -> int:
             await mesh.stop_auto_message_fetching()
         except Exception:  # noqa: BLE001
             pass
-        await mesh.disconnect()
+        try:
+            await mesh.disconnect()
+        finally:
+            # Hand the node back however we got here, including on Ctrl-C, so
+            # the relay is never left waiting on a stale pause file.
+            if paused:
+                coord.release_request()
+                log.info("Node handed back to the relay")
 
     report = summarise(results)
     print(report)

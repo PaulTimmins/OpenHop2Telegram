@@ -84,6 +84,7 @@ class Config:
     reconnect_max_delay: float
     healthcheck_interval: float
     notify_connection_events: bool
+    lock_dir: str
 
     @property
     def relay_mesh_to_tg(self) -> bool:
@@ -132,4 +133,5 @@ class Config:
             notify_connection_events=_parse_bool(
                 os.getenv("NOTIFY_CONNECTION_EVENTS", ""), True
             ),
+            lock_dir=os.getenv("LOCK_DIR", ".").strip() or ".",
         )

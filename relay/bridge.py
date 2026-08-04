@@ -9,6 +9,7 @@ from typing import Optional
 from meshcore import MeshCore, EventType
 
 from .config import Config
+from .coordination import Coordinator
 from .nodes import SeenNodes, describe, type_code
 from .telegram import TelegramClient
 
@@ -25,8 +26,10 @@ class Bridge:
         self._tg: Optional[TelegramClient] = None
         self._channel_idx: int = config.channel_index
         self._seen = SeenNodes(config.seen_nodes_file)
+        self._coord = Coordinator(config.lock_dir)
         # Set by the DISCONNECTED handler / health check to wake the supervisor.
         self._lost: Optional[asyncio.Event] = None
+        self._paused = False
         self._seeded = False
         self._announced_offline = False
 
@@ -36,6 +39,9 @@ class Bridge:
         self._tg = TelegramClient(cfg.telegram_bot_token, cfg.telegram_chat_id)
         me = await self._tg.get_me()
         log.info("Telegram connected as @%s", me.get("username", "?"))
+
+        # Lets maintenance tools tell that a relay is holding the node.
+        self._coord.write_pid()
 
         # The Telegram side is independent of the mesh link, so it keeps running
         # across mesh reconnects rather than being torn down with each session.
@@ -93,9 +99,31 @@ class Bridge:
             finally:
                 await self._teardown_session()
 
+            if self._paused:
+                # A tool asked for the node; hand it over and wait our turn.
+                await self._wait_out_pause()
+                continue
+
             log.warning("Mesh connection lost; reconnecting in %.0fs", delay)
             await self._announce_offline("connection lost")
             await asyncio.sleep(delay)
+
+    async def _wait_out_pause(self) -> None:
+        """Stay off the node until the pause request is withdrawn."""
+        self._paused = False
+        log.info("Released the node; waiting for %s to be removed", self._coord.pause_file)
+        if self._cfg.notify_connection_events and self._tg is not None:
+            await self._tg.send_message(
+                "\U0001F503 Handed the node to a maintenance task; back shortly."
+            )
+
+        self._coord.mark_released()
+        try:
+            while self._coord.pause_requested():
+                await asyncio.sleep(1)
+        finally:
+            self._coord.clear_released()
+        log.info("Pause lifted; reconnecting")
 
     async def _connect_session(self) -> None:
         """Open a mesh session and attach every subscription it needs."""
@@ -144,18 +172,41 @@ class Bridge:
         assert self._lost is not None
         interval = self._cfg.healthcheck_interval
         if interval <= 0:
-            await self._lost.wait()
+            # Health checks off, but we still have to notice a pause request.
+            while not self._lost.is_set():
+                if self._coord.pause_requested():
+                    log.info("Pause requested; releasing the node")
+                    self._paused = True
+                    return
+                try:
+                    await asyncio.wait_for(self._lost.wait(), timeout=2.0)
+                    return
+                except asyncio.TimeoutError:
+                    pass
             return
 
+        # Poll often enough that a pause request is noticed promptly, rather than
+        # only at the health-check interval.
+        tick = min(interval, 2.0)
+        elapsed = 0.0
+
         while not self._lost.is_set():
+            if self._coord.pause_requested():
+                log.info("Pause requested; releasing the node")
+                self._paused = True
+                return
             try:
-                await asyncio.wait_for(self._lost.wait(), timeout=interval)
+                await asyncio.wait_for(self._lost.wait(), timeout=tick)
                 return
             except asyncio.TimeoutError:
                 pass
-            if not await self._healthy():
-                log.warning("Health check failed; treating the link as down")
-                return
+
+            elapsed += tick
+            if elapsed >= interval:
+                elapsed = 0.0
+                if not await self._healthy():
+                    log.warning("Health check failed; treating the link as down")
+                    return
 
     async def _healthy(self) -> bool:
         """Ask the node for its time as a cheap liveness probe.
@@ -389,6 +440,8 @@ class Bridge:
     # --- teardown ---------------------------------------------------------
 
     async def aclose(self) -> None:
+        self._coord.clear_pid()
+        self._coord.clear_released()
         await self._teardown_session()
         if self._tg is not None:
             await self._tg.close()

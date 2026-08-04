@@ -287,6 +287,47 @@ columns, start a new file rather than appending to the old one.
 > Airtime cost: metrics add two requests per node per run, on top of the clock
 > check. That's the main reason the timer defaults to every 6 hours.
 
+### Running it while the relay is running
+
+**Safe — the two coordinate automatically.** You don't need to stop the relay.
+
+This matters because a MeshCore companion session is effectively exclusive:
+messages are *popped* off the device with `SYNC_NEXT_MESSAGE`, so two connected
+clients split the queue between them. Left uncoordinated, the relay would swallow
+CLI replies the checker is waiting for, and the checker would swallow channel
+messages that should have been relayed — silently, in both directions. (This is
+the same reason MeshMonitor's virtual-node server and `meshcore-proxy` exist.)
+
+So the checker asks for the node and **waits for proof** before connecting:
+
+1. The relay writes `relay.pid` while it's running.
+2. The checker creates `mesh.pause` and waits.
+3. The relay drops its session and writes `relay.released` — actual
+   confirmation, not a fixed sleep.
+4. The checker does its work, then removes `mesh.pause`.
+5. The relay reconnects on its own (it already retries indefinitely).
+
+The chat gets `🔄 Handed the node to a maintenance task; back shortly.` and then
+`✅ Reconnected`. Telegram polling keeps running throughout, so nothing sent to
+the chat during the handover is lost — it's queued and delivered when the node
+comes back.
+
+If no relay is running, the checker proceeds immediately. If a relay is running
+but doesn't release within `--pause-timeout` (default 90s), the run **aborts
+without changing anything** rather than risking a split queue.
+
+`LOCK_DIR` sets where the three files live (default: the working directory). It
+must be the same for the relay and the checker — the bundled systemd units both
+use `WorkingDirectory`, so they agree by default.
+
+```bash
+# Only if you're certain the relay isn't connected:
+python3 scripts/sync_node_time.py --no-pause
+```
+
+> `scripts/list_nodes.py` also opens a session, so prefer `--offline` while the
+> relay is running — it reads the store without touching the node.
+
 ### Running it on a schedule
 
 `openhop-timesync.service` and `openhop-timesync.timer` are included (every 6
