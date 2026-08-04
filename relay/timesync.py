@@ -133,34 +133,70 @@ def classify(drift: int, tolerance: int) -> str:
 class NodeTimeSync:
     """Runs the query/correct cycle against one connected MeshCore node."""
 
-    def __init__(self, mesh: Any, config: SyncConfig, *, dry_run: bool = False):
+    def __init__(
+        self,
+        mesh: Any,
+        config: SyncConfig,
+        *,
+        dry_run: bool = False,
+        metrics: Any = None,
+    ):
         self._mesh = mesh
         self._cfg = config
         self._dry_run = dry_run
+        self._metrics = metrics
 
     async def run(self) -> list[NodeResult]:
         results: list[NodeResult] = []
         for spec in self._cfg.nodes:
+            label = spec.name or spec.pubkey[:12]
+
+            # Without a contact there's nothing to query at all.
             try:
-                results.append(await self._process(spec))
+                contact = await self._resolve(spec)
             except TimeSyncError as exc:
-                log.warning("%s: %s", spec.name or spec.pubkey, exc)
-                results.append(
-                    NodeResult(spec.name or spec.pubkey, "error", detail=str(exc))
-                )
-            except Exception as exc:  # noqa: BLE001 - one bad node must not stop the rest
-                log.exception("%s: unexpected failure", spec.name or spec.pubkey)
-                results.append(
-                    NodeResult(spec.name or spec.pubkey, "error", detail=repr(exc))
-                )
+                log.warning("%s: %s", label, exc)
+                results.append(NodeResult(label, "error", detail=str(exc)))
+                continue
+
+            result = await self._safe_clock_cycle(spec, contact, label)
+            results.append(result)
+
+            # Metrics are collected whatever the clock outcome: telemetry needs
+            # no admin login, so a node we can't manage can still be graphed.
+            if self._metrics is not None:
+                try:
+                    await self._metrics.collect(
+                        self._mesh, label, contact, result.drift
+                    )
+                except Exception:  # noqa: BLE001
+                    log.exception("%s: metrics collection failed", label)
         return results
 
-    async def _process(self, spec: NodeSpec) -> NodeResult:
-        label = spec.name or spec.pubkey[:12]
-        contact = await self._resolve(spec)
+    async def _safe_clock_cycle(
+        self, spec: NodeSpec, contact: Any, label: str
+    ) -> NodeResult:
+        try:
+            return await self._clock_cycle(spec, contact, label)
+        except TimeSyncError as exc:
+            log.warning("%s: %s", label, exc)
+            return NodeResult(label, "error", detail=str(exc))
+        except Exception as exc:  # noqa: BLE001 - one bad node must not stop the rest
+            log.exception("%s: unexpected failure", label)
+            return NodeResult(label, "error", detail=repr(exc))
 
+    async def _clock_cycle(self, spec: NodeSpec, contact: Any, label: str) -> NodeResult:
         if not spec.password:
-            raise TimeSyncError("no password configured; admin CLI needs a login")
+            if spec.set_time:
+                # They asked for the clock to be managed, so a missing password
+                # is a misconfiguration rather than an intentional skip.
+                raise TimeSyncError(
+                    "set_time is on but no password is configured; "
+                    "the admin CLI needs a login"
+                )
+            return NodeResult(
+                label, "skipped", detail="no password; clock not checked"
+            )
 
         await self._login(contact, spec.password, label)
 

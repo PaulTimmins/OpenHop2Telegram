@@ -11,6 +11,10 @@ seen_nodes.json
 # (time_sync.example.json is the tracked template.)
 time_sync.json
 
+# Collected metrics
+metrics.csv
+*.csv
+
 # Virtualenvs
 .venv/
 venv/

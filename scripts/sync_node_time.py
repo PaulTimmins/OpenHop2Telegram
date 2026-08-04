@@ -27,6 +27,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from meshcore import MeshCore  # noqa: E402
 
 from relay.config import Config  # noqa: E402
+from relay.metrics import MetricsCollector, MetricsWriter  # noqa: E402
 from relay.telegram import TelegramClient  # noqa: E402
 from relay.timesync import (  # noqa: E402
     NodeTimeSync,
@@ -59,6 +60,18 @@ def parse_args() -> argparse.Namespace:
         "--quiet-when-ok",
         action="store_true",
         help="with --notify, only message when something needs attention",
+    )
+    p.add_argument(
+        "--metrics",
+        metavar="CSV",
+        default="metrics.csv",
+        help="append battery/temperature/radio metrics to this CSV "
+        "(default: metrics.csv)",
+    )
+    p.add_argument(
+        "--no-metrics",
+        action="store_true",
+        help="skip metric collection; each node costs two extra requests",
     )
     p.add_argument("--log-level", default="INFO")
     return p.parse_args()
@@ -101,7 +114,17 @@ async def run(args: argparse.Namespace) -> int:
         # Populates the contact cache that name lookups rely on.
         await mesh.ensure_contacts()
 
-        results = await NodeTimeSync(mesh, sync_cfg, dry_run=args.dry_run).run()
+        collector = (
+            None
+            if args.no_metrics
+            else MetricsCollector(MetricsWriter(args.metrics))
+        )
+        if collector is not None:
+            log.info("Logging metrics to %s", args.metrics)
+
+        results = await NodeTimeSync(
+            mesh, sync_cfg, dry_run=args.dry_run, metrics=collector
+        ).run()
     finally:
         try:
             await mesh.stop_auto_message_fetching()

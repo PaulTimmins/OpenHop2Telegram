@@ -223,6 +223,52 @@ means power-cycling the node.
 
 [1332]: https://github.com/meshcore-dev/MeshCore/issues/1332
 
+### Metrics logging
+
+The same run also appends a row per node to a CSV (default `metrics.csv`), for
+graphing later:
+
+```csv
+timestamp_utc,epoch,node,pubkey,clock_drift_s,battery_mv,battery_pct,voltage_v,current_a,charge_state,temperature_c,…
+2026-08-04T12:00:03Z,1785417603,Hilltop Repeater,a3f9c1…,-12,4021,87,4.05,-0.12,discharging,21.5,…
+```
+
+Columns come from two requests per node:
+
+- **Status** — `battery_mv`, `uptime_s`, `tx_queue_len`, `noise_floor`,
+  `last_rssi`, `last_snr`, `airtime_s`, `rx_airtime_s`, packet counters,
+  `recv_errors`.
+- **Telemetry** (Cayenne LPP, whatever sensors the node publishes) —
+  `temperature_c`, `voltage_v`, `current_a`, `battery_pct`, `illuminance_lux`,
+  `power_w`, `humidity_pct`.
+
+`charge_state` is derived from `current_a` (`charging` / `discharging` / `idle`,
+blank when the node reports no current). **The sign convention is the node's, not
+ours** — this assumes positive current means charge going in. Verify it against a
+node you can watch before trusting the column; `current_a` is logged raw so it
+can always be re-derived.
+
+Both requests are best-effort and independent. A node that answers one but not
+the other still gets a row with the missing fields **blank rather than zero**, so
+gaps read as gaps when graphed. `status_ok` and `telemetry_ok` record which half
+succeeded. Any LPP reading without a named column (GPS, accelerometer, anything
+unrecognised) is preserved verbatim in `telemetry_json`, so nothing is lost.
+
+Metrics need no admin login, so a node listed with **no password and
+`set_time: false`** is graphed without its clock being touched — useful for
+nodes you don't administer.
+
+```bash
+python3 scripts/sync_node_time.py --metrics /var/log/mesh/metrics.csv
+python3 scripts/sync_node_time.py --no-metrics   # skip; saves 2 requests/node
+```
+
+The header is written once per file. If you upgrade to a version with new
+columns, start a new file rather than appending to the old one.
+
+> Airtime cost: metrics add two requests per node per run, on top of the clock
+> check. That's the main reason the timer defaults to every 6 hours.
+
 ### Running it on a schedule
 
 `openhop-timesync.service` and `openhop-timesync.timer` are included (every 6
@@ -303,6 +349,8 @@ rm seen_nodes.json
 - **Clock checks** — `send_login_sync()` then `send_cmd(dst, "clock")`, with the
   reply read off `EventType.CONTACT_MSG_RECV`; corrections go out as
   `send_cmd(dst, "time <epoch>")`.
+- **Metrics** — `req_status_sync()` for battery and radio counters, plus
+  `req_telemetry_sync()` for LPP sensor readings, flattened to fixed CSV columns.
 
 ## Notes & limits
 

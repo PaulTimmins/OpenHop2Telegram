@@ -9,7 +9,10 @@
     "password. set_time=true lets the script push the correct time; with",
     "false it only reports drift.",
     "Note: firmware refuses to move a clock backwards, so a node running",
-    "AHEAD cannot be fixed over the mesh and needs a power cycle."
+    "AHEAD cannot be fixed over the mesh and needs a power cycle.",
+    "Metrics (battery, temperature, radio counters) are logged for every node",
+    "listed here. Telemetry needs no login, so a node with no password and",
+    "set_time=false is graphed without its clock being touched."
   ],
   "tolerance_seconds": 120,
   "reply_timeout": 45,
@@ -28,6 +31,10 @@
       "pubkey": "a3f9c1",
       "password": "changeme",
       "set_time": true
+    },
+    {
+      "name": "Ridge Repeater (metrics only, no admin password)",
+      "set_time": false
     }
   ]
 }

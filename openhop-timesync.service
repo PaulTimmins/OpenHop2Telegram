@@ -15,8 +15,11 @@ EnvironmentFile=/opt/openhop-telegram-relay/.env
 
 # Drop --notify if you'd rather not get a Telegram summary, or add
 # --quiet-when-ok to only hear about nodes that need attention.
+# Metrics are appended to --metrics (add --no-metrics to skip the two extra
+# requests per node).
 ExecStart=/opt/openhop-telegram-relay/.venv/bin/python \
-    scripts/sync_node_time.py --notify --quiet-when-ok
+    scripts/sync_node_time.py --notify --quiet-when-ok \
+    --metrics /opt/openhop-telegram-relay/metrics.csv
 
 # The script exits 1 when a node is out of tolerance and couldn't be fixed.
 # That's information, not a service failure, so don't let it mark the unit
