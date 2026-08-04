@@ -19,6 +19,7 @@ verbatim in `telemetry_json`, so nothing is silently dropped.
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import json
 import logging
@@ -235,7 +236,13 @@ class MetricsCollector:
             log.debug("%s: %s unavailable in this meshcore version", label, method)
             return None
         try:
-            result = await fn(contact)
+            # These wait on a reply from a node that may simply never answer, so
+            # they need our own deadline: an unreachable node would otherwise
+            # hang the whole run.
+            result = await asyncio.wait_for(fn(contact), timeout=self._timeout)
+        except asyncio.TimeoutError:
+            log.info("%s: %s timed out after %.0fs", label, method, self._timeout)
+            return None
         except Exception as exc:  # noqa: BLE001 - a silent node is normal
             log.debug("%s: %s failed: %s", label, method, exc)
             return None

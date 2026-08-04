@@ -16,6 +16,16 @@
   ],
   "tolerance_seconds": 120,
   "reply_timeout": 45,
+  "_discovery": [
+    "metrics_for_known_nodes: also sample every node the relay has discovered",
+    "  (from seen_nodes.json), without listing it here. Telemetry needs no",
+    "  login, so this graphs nodes you don't administer. Clocks are never",
+    "  touched this way — only nodes listed below can be corrected.",
+    "metrics_node_types: which discovered types to sample. Default REP+ROOM;",
+    "  adding CLI will sample every handheld that has ever advertised."
+  ],
+  "metrics_for_known_nodes": false,
+  "metrics_node_types": ["REP", "ROOM"],
   "nodes": [
     {
       "name": "Hilltop Repeater",

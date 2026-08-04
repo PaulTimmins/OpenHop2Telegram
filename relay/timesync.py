@@ -16,6 +16,7 @@ minute to avoid chasing that quantisation.
 
 from __future__ import annotations
 
+import asyncio
 import calendar
 import logging
 import re
@@ -81,11 +82,20 @@ class SyncConfig:
     tolerance_seconds: int = 120
     reply_timeout: float = 45.0
     nodes: list[NodeSpec] = field(default_factory=list)
+    # Collect metrics from nodes discovered by the relay, not just listed ones.
+    metrics_for_known_nodes: bool = False
+    metrics_node_types: frozenset[str] = frozenset({"REP", "ROOM"})
 
     @classmethod
     def from_dict(cls, raw: dict) -> "SyncConfig":
         nodes = [NodeSpec.from_dict(n) for n in raw.get("nodes", [])]
         tolerance = int(raw.get("tolerance_seconds", 120))
+        types = raw.get("metrics_node_types")
+        node_types = (
+            frozenset(str(t).upper() for t in types)
+            if isinstance(types, list) and types
+            else frozenset({"REP", "ROOM"})
+        )
         if tolerance < 60:
             log.warning(
                 "tolerance_seconds=%d is below the clock reply's 60s resolution; "
@@ -96,6 +106,8 @@ class SyncConfig:
             tolerance_seconds=tolerance,
             reply_timeout=float(raw.get("reply_timeout", 45.0)),
             nodes=nodes,
+            metrics_for_known_nodes=bool(raw.get("metrics_for_known_nodes", False)),
+            metrics_node_types=node_types,
         )
 
 
@@ -140,11 +152,13 @@ class NodeTimeSync:
         *,
         dry_run: bool = False,
         metrics: Any = None,
+        store: Any = None,
     ):
         self._mesh = mesh
         self._cfg = config
         self._dry_run = dry_run
         self._metrics = metrics
+        self._store = store
 
     async def run(self) -> list[NodeResult]:
         results: list[NodeResult] = []
@@ -171,7 +185,55 @@ class NodeTimeSync:
                     )
                 except Exception:  # noqa: BLE001
                     log.exception("%s: metrics collection failed", label)
+
+        results.extend(await self._discovered_metrics(results))
         return results
+
+    async def _discovered_metrics(self, done: list[NodeResult]) -> list[NodeResult]:
+        """Sample nodes the relay discovered but the config doesn't list.
+
+        Telemetry needs no login, so anything the relay has seen can be graphed
+        without being configured by hand.
+        """
+        if not (
+            self._cfg.metrics_for_known_nodes
+            and self._metrics is not None
+            and self._store is not None
+        ):
+            return []
+
+        covered = {r.name for r in done}
+        extra: list[NodeResult] = []
+
+        for pubkey, record in (self._store.nodes or {}).items():
+            code = (record.get("type") or "").upper()
+            if code not in self._cfg.metrics_node_types:
+                continue
+            label = (record.get("name") or "").strip() or pubkey[:12]
+            if label in covered:
+                continue  # already handled as a configured node
+
+            contact = self._contact_for(pubkey)
+            if contact is None:
+                log.debug("%s: discovered but not in the node's contacts", label)
+                continue
+            try:
+                await self._metrics.collect(self._mesh, label, contact, None)
+                extra.append(
+                    NodeResult(label, "skipped", detail="metrics only (discovered)")
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("%s: discovered-node metrics failed: %s", label, exc)
+                extra.append(NodeResult(label, "error", detail=repr(exc)))
+        return extra
+
+    def _contact_for(self, pubkey: str) -> Any:
+        contacts = getattr(self._mesh, "contacts", None)
+        if isinstance(contacts, dict):
+            contact = contacts.get(pubkey)
+            if contact is not None:
+                return contact
+        return None
 
     async def _safe_clock_cycle(
         self, spec: NodeSpec, contact: Any, label: str
@@ -259,19 +321,52 @@ class NodeTimeSync:
             for key, contact in contacts.items():
                 if key.lower().startswith(spec.pubkey.lower()):
                     return contact
+            # The store may hold the full key for a prefix we were given.
+            if self._store is not None:
+                found = self._store.find(spec.pubkey)
+                if found:
+                    contact = self._contact_for(found[0])
+                    if contact is not None:
+                        return contact
             # Fall back to the raw key; the library accepts a hex string.
             return spec.pubkey
 
         contact = self._mesh.get_contact_by_name(spec.name)
-        if not contact:
-            raise TimeSyncError(
-                f"no contact named {spec.name!r} on the node "
-                f"(names must match the advertised name exactly)"
-            )
-        return contact
+        if contact:
+            return contact
+
+        # Fall back to the relay's node store: it may know this name from an
+        # advert even when the live contact lookup misses it.
+        if self._store is not None:
+            found = self._store.find(spec.name)
+            if found:
+                pubkey, _record = found
+                contact = self._contact_for(pubkey)
+                if contact is not None:
+                    log.debug("%s: resolved via the node store", spec.name)
+                    return contact
+                raise TimeSyncError(
+                    f"{spec.name!r} is in the node store ({pubkey[:12]}) but not in "
+                    f"the node's contact list, so it can't be reached"
+                )
+
+        raise TimeSyncError(
+            f"no contact named {spec.name!r} on the node "
+            f"(names must match the advertised name exactly; "
+            f"run scripts/list_nodes.py to see what's known)"
+        )
 
     async def _login(self, contact: Any, password: str, label: str) -> None:
-        result = await self._mesh.commands.send_login_sync(contact, password)
+        try:
+            result = await asyncio.wait_for(
+                self._mesh.commands.send_login_sync(contact, password),
+                timeout=self._cfg.reply_timeout,
+            )
+        except asyncio.TimeoutError:
+            raise TimeSyncError(
+                f"login timed out after {self._cfg.reply_timeout:.0f}s "
+                f"(node out of reach?)"
+            )
         if result is None or getattr(result, "type", None) == EventType.ERROR:
             raise TimeSyncError(
                 "login failed (wrong password, or the node is out of reach)"

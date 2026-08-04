@@ -28,6 +28,7 @@ from meshcore import MeshCore  # noqa: E402
 
 from relay.config import Config  # noqa: E402
 from relay.metrics import MetricsCollector, MetricsWriter  # noqa: E402
+from relay.nodes import SeenNodes  # noqa: E402
 from relay.telegram import TelegramClient  # noqa: E402
 from relay.timesync import (  # noqa: E402
     NodeTimeSync,
@@ -72,6 +73,11 @@ def parse_args() -> argparse.Namespace:
         "--no-metrics",
         action="store_true",
         help="skip metric collection; each node costs two extra requests",
+    )
+    p.add_argument(
+        "--store",
+        default=None,
+        help="path to the relay's node store (default: SEEN_NODES_FILE)",
     )
     p.add_argument("--log-level", default="INFO")
     return p.parse_args()
@@ -122,8 +128,17 @@ async def run(args: argparse.Namespace) -> int:
         if collector is not None:
             log.info("Logging metrics to %s", args.metrics)
 
+        # The relay's node store lets nodes be referenced by the names and keys
+        # it has already discovered, and can drive metrics-only sampling.
+        store = SeenNodes(args.store or cfg.seen_nodes_file)
+        store.load()
+
         results = await NodeTimeSync(
-            mesh, sync_cfg, dry_run=args.dry_run, metrics=collector
+            mesh,
+            sync_cfg,
+            dry_run=args.dry_run,
+            metrics=collector,
+            store=store,
         ).run()
     finally:
         try:

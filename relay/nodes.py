@@ -11,8 +11,9 @@ import json
 import logging
 import os
 import tempfile
+import time
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Optional
 
 log = logging.getLogger("relay.nodes")
 
@@ -65,55 +66,161 @@ def describe(contact: dict) -> str:
 
 
 class SeenNodes:
-    """A persistent set of public keys we have already announced."""
+    """A persistent record of the nodes we know about.
+
+    Stores what each node is, not just its key, so the file is readable and can
+    be reused by the clock checker and metrics collector.
+
+    Version 1 of this file was a bare list of public keys. Those are migrated on
+    load into entries with unknown names, which fill in as the nodes advertise
+    again.
+    """
+
+    VERSION = 2
 
     def __init__(self, path: str | os.PathLike[str]):
         self._path = Path(path)
-        self._keys: set[str] = set()
+        self._nodes: dict[str, dict] = {}
         self._loaded = False
 
     def load(self) -> None:
         """Read the store from disk. A missing or corrupt file starts empty."""
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
-            self._keys = {str(k) for k in raw.get("seen", [])}
-            log.info("Loaded %d known node(s) from %s", len(self._keys), self._path)
+            self._nodes = self._parse(raw)
+            log.info("Loaded %d known node(s) from %s", len(self._nodes), self._path)
         except FileNotFoundError:
             log.info("No node store at %s yet; starting fresh", self._path)
-        except (json.JSONDecodeError, OSError, AttributeError) as exc:
+        except (json.JSONDecodeError, OSError, AttributeError, TypeError) as exc:
             # Losing this file only costs us duplicate announcements, so a bad
             # read should never stop the relay from starting.
             log.warning("Could not read %s (%s); starting fresh", self._path, exc)
         self._loaded = True
 
+    @classmethod
+    def _parse(cls, raw: Any) -> dict[str, dict]:
+        nodes = raw.get("nodes")
+        if isinstance(nodes, dict):
+            return {str(k): dict(v) for k, v in nodes.items() if isinstance(v, dict)}
+
+        # v1: {"seen": ["<pubkey>", ...]} — keep the keys, names unknown.
+        legacy = raw.get("seen")
+        if isinstance(legacy, list):
+            log.info("Migrating %d node(s) from the v1 store format", len(legacy))
+            return {str(k): {"name": "", "type": "", "first_seen": None} for k in legacy}
+        return {}
+
     def __contains__(self, pubkey: str) -> bool:
-        return pubkey in self._keys
+        return pubkey in self._nodes
 
     def __len__(self) -> int:
-        return len(self._keys)
+        return len(self._nodes)
 
     @property
     def is_empty(self) -> bool:
-        return not self._keys
+        return not self._nodes
 
-    def add(self, pubkey: str) -> bool:
-        """Record a key. Returns True if it was new."""
-        if not pubkey or pubkey in self._keys:
+    @property
+    def nodes(self) -> dict[str, dict]:
+        """The stored records, keyed by full public key."""
+        return dict(self._nodes)
+
+    def get(self, pubkey: str) -> Optional[dict]:
+        return self._nodes.get(pubkey)
+
+    def find(self, needle: str) -> Optional[tuple[str, dict]]:
+        """Look a node up by key prefix or by name, case-insensitively."""
+        needle = (needle or "").strip().lower()
+        if not needle:
+            return None
+        for key, record in self._nodes.items():
+            if key.lower().startswith(needle):
+                return key, record
+        for key, record in self._nodes.items():
+            if (record.get("name") or "").strip().lower() == needle:
+                return key, record
+        return None
+
+    def add(self, pubkey: str, contact: Optional[dict] = None) -> bool:
+        """Record a node. Returns True if it was new."""
+        if not pubkey:
             return False
-        self._keys.add(pubkey)
+        if pubkey in self._nodes:
+            # Known already, but a fresh advert may carry better details.
+            if contact and self._merge(self._nodes[pubkey], contact, seen_now=True):
+                self._save()
+            return False
+        self._nodes[pubkey] = self._record(contact, first_seen=time.time())
         self._save()
         return True
 
-    def seed(self, pubkeys: Iterable[str]) -> int:
-        """Record keys without announcing them. Returns how many were added."""
-        new = {k for k in pubkeys if k} - self._keys
-        if new:
-            self._keys |= new
+    def seed(self, contacts: Any) -> int:
+        """Record existing contacts without announcing them.
+
+        Accepts the node's contacts mapping (pubkey -> record) or a bare iterable
+        of keys. Returns how many were added.
+        """
+        if isinstance(contacts, dict):
+            items = list(contacts.items())
+        else:
+            items = [(k, None) for k in (contacts or [])]
+
+        added = 0
+        changed = False
+        for key, contact in items:
+            if not key:
+                continue
+            if key in self._nodes:
+                if contact and self._merge(self._nodes[key], contact, seen_now=False):
+                    changed = True
+                continue
+            # first_seen stays None: the node predates our tracking, so claiming
+            # we first saw it now would be a lie in the data.
+            self._nodes[key] = self._record(contact, first_seen=None)
+            added += 1
+        if added or changed:
             self._save()
-        return len(new)
+        return added
+
+    @staticmethod
+    def _record(contact: Optional[dict], first_seen: Optional[float]) -> dict:
+        contact = contact or {}
+        return {
+            "name": (contact.get("adv_name") or "").strip(),
+            "type": TYPE_CODES.get(contact.get("type"), ""),
+            "first_seen": int(first_seen) if first_seen else None,
+            "last_seen": int(time.time()),
+            "last_advert": contact.get("last_advert") or None,
+            "lat": contact.get("adv_lat") or None,
+            "lon": contact.get("adv_lon") or None,
+        }
+
+    @staticmethod
+    def _merge(record: dict, contact: dict, *, seen_now: bool) -> bool:
+        """Fill in or refresh details on an existing record."""
+        changed = False
+        name = (contact.get("adv_name") or "").strip()
+        if name and record.get("name") != name:
+            record["name"] = name
+            changed = True
+        code = TYPE_CODES.get(contact.get("type"), "")
+        if code and record.get("type") != code:
+            record["type"] = code
+            changed = True
+        for src, dst in (("last_advert", "last_advert"), ("adv_lat", "lat"), ("adv_lon", "lon")):
+            value = contact.get(src)
+            if value and record.get(dst) != value:
+                record[dst] = value
+                changed = True
+        if seen_now:
+            record["last_seen"] = int(time.time())
+            changed = True
+        return changed
 
     def _save(self) -> None:
-        payload = json.dumps({"seen": sorted(self._keys)}, indent=0)
+        payload = json.dumps(
+            {"version": self.VERSION, "nodes": self._nodes}, indent=1, sort_keys=True
+        )
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             # Write to a temp file in the same directory, then rename, so an

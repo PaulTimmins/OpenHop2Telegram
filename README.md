@@ -258,6 +258,24 @@ Metrics need no admin login, so a node listed with **no password and
 `set_time: false`** is graphed without its clock being touched — useful for
 nodes you don't administer.
 
+Taking that further, the checker can reuse the relay's node store instead of you
+listing anything:
+
+```json
+{ "metrics_for_known_nodes": true, "metrics_node_types": ["REP", "ROOM"] }
+```
+
+Every repeater and room server the relay has discovered then gets sampled each
+run. Clocks are never touched this way — only nodes listed explicitly can be
+corrected. Adding `"CLI"` sweeps in every handheld that has ever advertised,
+which is usually more airtime than it's worth.
+
+The store also makes node references more forgiving: a `name` or `pubkey` prefix
+in the config is matched against it when the live contact lookup misses, and a
+name that's in the store but absent from the node's contact list produces
+"in the node store but not in the node's contact list" rather than a bare
+"no contact named …".
+
 ```bash
 python3 scripts/sync_node_time.py --metrics /var/log/mesh/metrics.csv
 python3 scripts/sync_node_time.py --no-metrics   # skip; saves 2 requests/node
@@ -309,6 +327,33 @@ NOTIFY_NODE_TYPES=repeater,room
 
 Nodes filtered out this way are still recorded as seen, so turning a type on
 later won't backfill a burst of alerts for nodes already on the mesh.
+
+### Seeing what's known
+
+`seen_nodes.json` records what each node is, not just its key, so it's readable
+and reusable:
+
+```bash
+python3 scripts/list_nodes.py
+```
+
+```
+NAME                       TYPE         KEY            LAST ADVERT  WHERE      CLOCK CFG
+--------------------------------------------------------------------------------------------
+PaulHouse Repeater         repeater     7923698a5f79   12m ago      both       yes
+Ridge Room                 room server  ceac785abaca   3h ago       both       -
+Paul's phone               companion    e64c4a946b56   1d ago       store      -
+```
+
+It joins the store against the node's live contact list, so names and types fill
+in even for keys recorded before the store kept metadata. `--offline` skips the
+connection, `--json` emits machine-readable output, and
+`--time-sync-template` prints a ready-to-edit `nodes` block for the clock
+checker (with `set_time: false` so nothing changes until you review it).
+
+Older stores were a bare list of keys; those are migrated automatically on first
+load, with names filling in as each node advertises again. Nothing is
+re-announced by the upgrade.
 
 Announced nodes are remembered in `SEEN_NODES_FILE` (written atomically), so a
 restart doesn't repeat them. **On the very first run the node's existing contact

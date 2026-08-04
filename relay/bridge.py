@@ -258,7 +258,8 @@ class Bridge:
         first_run = self._seen.is_empty and announce_summary
 
         contacts = await self._fetch_contacts()
-        added = self._seen.seed(contacts.keys())
+        # Pass the full records so the store keeps names and types, not just keys.
+        added = self._seen.seed(contacts)
 
         if first_run and added:
             log.info("Recorded %d existing contact(s) without announcing", added)
@@ -296,10 +297,10 @@ class Bridge:
         if code not in self._cfg.notify_node_types:
             log.debug("Ignoring new %s node (filtered out): %s", code, pubkey[:6])
             # Still record it, so enabling the type later doesn't backfill alerts.
-            self._seen.add(pubkey)
+            self._seen.add(pubkey, contact)
             return
 
-        if not self._seen.add(pubkey):
+        if not self._seen.add(pubkey, contact):
             return  # already announced
 
         text = describe(contact)
