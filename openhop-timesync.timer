@@ -1,0 +1,19 @@
+[Unit]
+Description=Periodically check MeshCore node clocks
+Documentation=https://github.com/PaulTimmins/OpenHop2Telegram
+
+[Timer]
+# Every 6 hours. Clocks drift slowly, and each check costs airtime on a shared
+# channel (a login plus a command per node), so don't run this aggressively.
+OnCalendar=*-*-* 00,06,12,18:00:00
+
+# Spread the run out a bit so it never lines up exactly with other timers.
+RandomizedDelaySec=10m
+
+# If the machine was off when a run was due, do it shortly after boot.
+Persistent=true
+
+Unit=openhop-timesync.service
+
+[Install]
+WantedBy=timers.target

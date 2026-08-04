@@ -80,6 +80,10 @@ class Config:
     notify_node_types: frozenset[str]
     seen_nodes_file: str
     announce_seed_summary: bool
+    reconnect_min_delay: float
+    reconnect_max_delay: float
+    healthcheck_interval: float
+    notify_connection_events: bool
 
     @property
     def relay_mesh_to_tg(self) -> bool:
@@ -121,5 +125,11 @@ class Config:
             seen_nodes_file=os.getenv("SEEN_NODES_FILE", "seen_nodes.json").strip(),
             announce_seed_summary=_parse_bool(
                 os.getenv("ANNOUNCE_SEED_SUMMARY", ""), True
+            ),
+            reconnect_min_delay=float(os.getenv("RECONNECT_MIN_DELAY", "5")),
+            reconnect_max_delay=float(os.getenv("RECONNECT_MAX_DELAY", "300")),
+            healthcheck_interval=float(os.getenv("HEALTHCHECK_INTERVAL", "120")),
+            notify_connection_events=_parse_bool(
+                os.getenv("NOTIFY_CONNECTION_EVENTS", ""), True
             ),
         )

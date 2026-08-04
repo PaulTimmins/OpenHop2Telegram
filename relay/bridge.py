@@ -25,6 +25,10 @@ class Bridge:
         self._tg: Optional[TelegramClient] = None
         self._channel_idx: int = config.channel_index
         self._seen = SeenNodes(config.seen_nodes_file)
+        # Set by the DISCONNECTED handler / health check to wake the supervisor.
+        self._lost: Optional[asyncio.Event] = None
+        self._seeded = False
+        self._announced_offline = False
 
     async def run(self) -> None:
         cfg = self._cfg
@@ -33,11 +37,83 @@ class Bridge:
         me = await self._tg.get_me()
         log.info("Telegram connected as @%s", me.get("username", "?"))
 
+        # The Telegram side is independent of the mesh link, so it keeps running
+        # across mesh reconnects rather than being torn down with each session.
+        tg_task = (
+            asyncio.create_task(self._telegram_loop(), name="tg-poll")
+            if cfg.relay_tg_to_mesh
+            else None
+        )
+
+        try:
+            await self._supervise()
+        finally:
+            if tg_task is not None:
+                tg_task.cancel()
+                try:
+                    await tg_task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+            await self.aclose()
+
+    async def _supervise(self) -> None:
+        """Keep a mesh session alive forever, reconnecting with backoff.
+
+        meshcore's own auto-reconnect gives up after a handful of fast attempts,
+        which is not enough to survive the node being reconfigured or rebooted.
+        This loop retries indefinitely instead.
+        """
+        cfg = self._cfg
+        delay = cfg.reconnect_min_delay
+        first = True
+
+        while True:
+            try:
+                await self._connect_session()
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "Connection to %s:%s failed (%s); retrying in %.0fs",
+                    cfg.openhop_host,
+                    cfg.openhop_port,
+                    exc,
+                    delay,
+                )
+                await self._announce_offline(str(exc))
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, cfg.reconnect_max_delay)
+                continue
+
+            # Connected: reset the backoff so the next outage starts short.
+            delay = cfg.reconnect_min_delay
+            await self._announce_online(first)
+            first = False
+
+            try:
+                await self._await_disconnect()
+            finally:
+                await self._teardown_session()
+
+            log.warning("Mesh connection lost; reconnecting in %.0fs", delay)
+            await self._announce_offline("connection lost")
+            await asyncio.sleep(delay)
+
+    async def _connect_session(self) -> None:
+        """Open a mesh session and attach every subscription it needs."""
+        cfg = self._cfg
+        self._lost = asyncio.Event()
+
         log.info("Connecting to OpenHop at %s:%s ...", cfg.openhop_host, cfg.openhop_port)
+        # A high attempt count lets the library ride out brief blips on its own;
+        # anything worse falls through to _supervise, which never gives up.
         self._mesh = await MeshCore.create_tcp(
-            cfg.openhop_host, cfg.openhop_port, auto_reconnect=True
+            cfg.openhop_host,
+            cfg.openhop_port,
+            auto_reconnect=True,
+            max_reconnect_attempts=1_000_000,
         )
         log.info("Connected to OpenHop MeshCore node")
+
+        self._mesh.subscribe(EventType.DISCONNECTED, self._on_disconnected)
 
         self._channel_idx = await self._resolve_channel_index()
         log.info(
@@ -53,29 +129,96 @@ class Bridge:
             self._mesh.subscribe(EventType.CHANNEL_MSG_RECV, self._on_mesh_message)
 
         if cfg.notify_new_nodes:
-            await self._prime_seen_nodes()
+            # Only seed once per process: on later reconnects the store is
+            # already populated, and re-seeding would hide nodes that appeared
+            # while we were offline.
+            await self._prime_seen_nodes(announce_summary=not self._seeded)
+            self._seeded = True
             self._mesh.subscribe(EventType.NEW_CONTACT, self._on_new_contact)
 
         # Auto-fetch pulls queued messages off the node and emits *_MSG_RECV events.
         await self._mesh.start_auto_message_fetching()
 
-        tasks = []
-        if cfg.relay_tg_to_mesh:
-            tasks.append(asyncio.create_task(self._telegram_loop(), name="tg-poll"))
+    async def _await_disconnect(self) -> None:
+        """Block until the link drops, polling the node if a health check is on."""
+        assert self._lost is not None
+        interval = self._cfg.healthcheck_interval
+        if interval <= 0:
+            await self._lost.wait()
+            return
 
-        await self._tg.send_message(
-            f"✅ Relay online — bridging mesh channel "
-            f"“{cfg.channel_name}” ↔ this chat."
-        )
+        while not self._lost.is_set():
+            try:
+                await asyncio.wait_for(self._lost.wait(), timeout=interval)
+                return
+            except asyncio.TimeoutError:
+                pass
+            if not await self._healthy():
+                log.warning("Health check failed; treating the link as down")
+                return
 
+    async def _healthy(self) -> bool:
+        """Ask the node for its time as a cheap liveness probe.
+
+        A TCP session can stay open while the node stops answering (this is what
+        a silent stall looks like), so waiting for a socket error isn't enough.
+        """
+        if self._mesh is None:
+            return False
         try:
-            if tasks:
-                await asyncio.gather(*tasks)
-            else:
-                # mesh_to_tg only: nothing to actively poll, just idle.
-                await asyncio.Event().wait()
-        finally:
-            await self.aclose()
+            result = await asyncio.wait_for(self._mesh.commands.get_time(), timeout=20)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Health check error: %s", exc)
+            return False
+        return getattr(result, "type", None) != EventType.ERROR
+
+    async def _on_disconnected(self, event) -> None:
+        payload = getattr(event, "payload", None) or {}
+        reason = payload.get("reason", "unknown")
+        if payload.get("reason") == "manual_disconnect":
+            return  # our own shutdown
+        log.warning("Node reported disconnect (reason=%s)", reason)
+        if self._lost is not None:
+            self._lost.set()
+
+    async def _teardown_session(self) -> None:
+        """Drop the current mesh session so the next attempt starts clean."""
+        mesh, self._mesh = self._mesh, None
+        if mesh is None:
+            return
+        try:
+            await mesh.stop_auto_message_fetching()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            await mesh.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # --- connection notifications -----------------------------------------
+
+    async def _announce_online(self, first: bool) -> None:
+        self._announced_offline = False
+        if self._tg is None:
+            return
+        if first:
+            await self._tg.send_message(
+                f"✅ Relay online — bridging mesh channel "
+                f"“{self._cfg.channel_name}” ↔ this chat."
+            )
+        elif self._cfg.notify_connection_events:
+            await self._tg.send_message("✅ Reconnected to the mesh node.")
+
+    async def _announce_offline(self, reason: str) -> None:
+        # Only the first failure in an outage is reported, so a node that stays
+        # down doesn't produce a message per retry.
+        if self._announced_offline or self._tg is None:
+            return
+        self._announced_offline = True
+        if self._cfg.notify_connection_events:
+            await self._tg.send_message(
+                f"⚠️ Lost the mesh node ({reason}). Retrying until it's back."
+            )
 
     # --- mesh -> telegram -------------------------------------------------
 
@@ -103,15 +246,16 @@ class Bridge:
 
     # --- new node announcements -------------------------------------------
 
-    async def _prime_seen_nodes(self) -> None:
+    async def _prime_seen_nodes(self, announce_summary: bool = True) -> None:
         """Record the node's existing contacts so we only announce genuinely new ones.
 
         Without this, the first run would announce every contact the node
         already knows about.
         """
         assert self._mesh is not None
-        self._seen.load()
-        first_run = self._seen.is_empty
+        if not self._seeded:
+            self._seen.load()
+        first_run = self._seen.is_empty and announce_summary
 
         contacts = await self._fetch_contacts()
         added = self._seen.seed(contacts.keys())
@@ -166,20 +310,32 @@ class Bridge:
     # --- telegram -> mesh -------------------------------------------------
 
     async def _telegram_loop(self) -> None:
-        assert self._tg is not None and self._mesh is not None
+        assert self._tg is not None
         async for message in self._tg.poll_messages():
             text = (message.get("text") or "").strip()
             if not text or text.startswith("/"):
                 continue  # skip empty messages and bot commands
 
+            # This task outlives any single mesh session, so the node may be
+            # down right now. Say so rather than dropping the message silently.
+            mesh = self._mesh
+            if mesh is None:
+                log.warning("Dropping Telegram message; mesh node is offline")
+                await self._tg.send_message(
+                    "⚠️ Not sent — the mesh node is offline right now."
+                )
+                continue
+
             body = self._format_outgoing(message, text)
             log.info("tg -> mesh: %s", body)
             try:
-                result = await self._mesh.commands.send_chan_msg(self._channel_idx, body)
+                result = await mesh.commands.send_chan_msg(self._channel_idx, body)
                 if getattr(result, "type", None) == EventType.ERROR:
                     log.warning("Mesh send error: %s", result.payload)
+                    await self._tg.send_message(f"⚠️ Mesh rejected that: {result.payload}")
             except Exception as exc:  # noqa: BLE001
                 log.warning("Failed to send to mesh: %s", exc)
+                await self._tg.send_message(f"⚠️ Failed to send that to the mesh: {exc}")
 
     def _format_outgoing(self, message: dict, text: str) -> str:
         who = (message.get("from", {}) or {}).get("first_name", "").strip()
@@ -232,11 +388,7 @@ class Bridge:
     # --- teardown ---------------------------------------------------------
 
     async def aclose(self) -> None:
-        if self._mesh is not None:
-            try:
-                await self._mesh.stop_auto_message_fetching()
-                await self._mesh.disconnect()
-            except Exception:  # noqa: BLE001
-                pass
+        await self._teardown_session()
         if self._tg is not None:
             await self._tg.close()
+            self._tg = None

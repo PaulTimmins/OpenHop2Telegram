@@ -1,0 +1,43 @@
+[Unit]
+Description=Check and correct MeshCore node clocks
+Documentation=https://github.com/PaulTimmins/OpenHop2Telegram
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Runs once per timer firing and exits; the timer owns the schedule.
+Type=oneshot
+
+User=openhop
+Group=openhop
+WorkingDirectory=/opt/openhop-telegram-relay
+EnvironmentFile=/opt/openhop-telegram-relay/.env
+
+# Drop --notify if you'd rather not get a Telegram summary, or add
+# --quiet-when-ok to only hear about nodes that need attention.
+ExecStart=/opt/openhop-telegram-relay/.venv/bin/python \
+    scripts/sync_node_time.py --notify --quiet-when-ok
+
+# The script exits 1 when a node is out of tolerance and couldn't be fixed.
+# That's information, not a service failure, so don't let it mark the unit
+# failed or trip a restart policy.
+SuccessExitStatus=0 1
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=openhop-timesync
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/openhop-telegram-relay
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

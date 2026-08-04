@@ -1,0 +1,33 @@
+{
+  "_comment": [
+    "Copy to time_sync.json (gitignored — it holds admin passwords).",
+    "tolerance_seconds: how far a clock may drift before it counts as wrong.",
+    "  The node's `clock` reply only has minute resolution, so a correctly-set",
+    "  node can read up to 59s behind. Keep this above 60.",
+    "reply_timeout: seconds to wait for an admin CLI reply over the mesh.",
+    "Each node needs the advertised name (or a pubkey prefix) and the admin",
+    "password. set_time=true lets the script push the correct time; with",
+    "false it only reports drift.",
+    "Note: firmware refuses to move a clock backwards, so a node running",
+    "AHEAD cannot be fixed over the mesh and needs a power cycle."
+  ],
+  "tolerance_seconds": 120,
+  "reply_timeout": 45,
+  "nodes": [
+    {
+      "name": "Hilltop Repeater",
+      "password": "changeme",
+      "set_time": true
+    },
+    {
+      "name": "Valley Room Server",
+      "password": "changeme",
+      "set_time": false
+    },
+    {
+      "pubkey": "a3f9c1",
+      "password": "changeme",
+      "set_time": true
+    }
+  ]
+}

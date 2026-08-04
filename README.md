@@ -57,6 +57,9 @@ All configuration is via environment variables (or a `.env` file). See
 | `NOTIFY_NEW_NODES` | Alert when a node is seen for the first time | `true` |
 | `NOTIFY_NODE_TYPES` | Which node types to alert on | `all` |
 | `SEEN_NODES_FILE` | Where already-announced nodes are remembered | `seen_nodes.json` |
+| `RECONNECT_MIN_DELAY` / `RECONNECT_MAX_DELAY` | Reconnect backoff bounds (seconds) | `5` / `300` |
+| `HEALTHCHECK_INTERVAL` | Liveness probe interval; `0` disables | `120` |
+| `NOTIFY_CONNECTION_EVENTS` | Tell the chat when the link drops/returns | `true` |
 
 ### Getting the chat ID
 
@@ -137,6 +140,106 @@ sudo chmod 600 /opt/openhop-telegram-relay/.env
 > On macOS there is no systemd — use a `launchd` plist (or just run `python -m relay`
 > in a `tmux`/`screen` session) instead.
 
+## Reconnection
+
+The relay reconnects on its own and **retries indefinitely**, backing off from
+`RECONNECT_MIN_DELAY` up to `RECONNECT_MAX_DELAY`. Restarting or reconfiguring
+the OpenHop node, or a network blip, no longer needs a manual restart here.
+
+This is deliberately not left to the `meshcore` library: its own auto-reconnect
+makes only `max_reconnect_attempts` tries (default **3**) one second apart, then
+emits `DISCONNECTED` with `max_attempts_exceeded` and stops trying for good. Any
+outage longer than a few seconds — exactly what a config change on the node
+looks like — left the relay silently dead until restarted.
+
+Two things also guard against the failure being invisible:
+
+- **A liveness probe.** Every `HEALTHCHECK_INTERVAL` seconds the node is asked
+  for its time. A TCP session can stay open while the node stops answering, so
+  waiting for a socket error isn't enough to notice a stall.
+- **Chat notifications.** You get `⚠️ Lost the mesh node …` once per outage (not
+  once per retry) and `✅ Reconnected to the mesh node.` when it recovers. Set
+  `NOTIFY_CONNECTION_EVENTS=false` to keep it to the logs.
+
+Telegram polling is independent of the mesh session, so it keeps running through
+an outage. A message sent while the node is down is answered with
+`⚠️ Not sent — the mesh node is offline right now.` rather than vanishing.
+
+## Node clock checking
+
+`scripts/sync_node_time.py` asks each configured node for its clock and, where
+you've allowed it, corrects it. It's a separate one-shot script meant to run on a
+schedule, not part of the relay daemon.
+
+```bash
+cp time_sync.example.json time_sync.json   # then edit: names, passwords
+chmod 600 time_sync.json                   # it holds admin passwords
+python3 scripts/sync_node_time.py --dry-run
+```
+
+```json
+{
+  "tolerance_seconds": 120,
+  "nodes": [
+    { "name": "Hilltop Repeater",   "password": "…", "set_time": true },
+    { "name": "Valley Room Server", "password": "…", "set_time": false }
+  ]
+}
+```
+
+Each node needs its advertised name (or a `pubkey` prefix) and its admin
+password — reading the clock over the mesh requires a login. `set_time` is what
+"configured for this node" means: `true` lets the script push the correct time,
+`false` reports drift and changes nothing. Identify nodes with:
+
+```bash
+python3 scripts/sync_node_time.py --dry-run   # reports each configured node
+```
+
+Flags: `--dry-run` (never write), `--notify` (post a summary to Telegram),
+`--quiet-when-ok` (with `--notify`, only speak up when something needs
+attention), `--config` (alternate path). Exit status is `0` when every node is
+within tolerance or was corrected and `1` otherwise, so a timer can alert on it.
+
+Output looks like:
+
+```
+✅ Hilltop Repeater (+12s)
+🕑 Valley Room Server (-3600s) — OK - clock set: 14:23 - 12/3/2025 UTC
+⚠️ Ridge Repeater (+900s) — running 900s ahead; firmware refuses to set a clock backwards, so this needs a power cycle at the node
+```
+
+### Two firmware limits worth knowing
+
+**A clock that's ahead cannot be fixed remotely.** The firmware accepts
+`time <epoch>` only when the value is strictly greater than the node's current
+clock, so it will not move a clock backwards ([MeshCore#1332][1332]). The script
+detects this and reports it instead of wasting a transmission. Correcting it
+means power-cycling the node.
+
+**Drift resolution is one minute.** The `clock` reply is formatted
+`HH:MM - D/M/YYYY UTC` with no seconds, so a correctly-set node can read up to
+59s behind. Keep `tolerance_seconds` above 60 — the script warns if you don't.
+
+[1332]: https://github.com/meshcore-dev/MeshCore/issues/1332
+
+### Running it on a schedule
+
+`openhop-timesync.service` and `openhop-timesync.timer` are included (every 6
+hours by default — each check costs airtime on a shared channel, so don't run it
+aggressively):
+
+```bash
+sudo cp /opt/openhop-telegram-relay/openhop-timesync.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now openhop-timesync.timer
+systemctl list-timers openhop-timesync.timer
+```
+
+Run it once by hand with `sudo systemctl start openhop-timesync.service`. The
+unit sets `SuccessExitStatus=0 1` so a node that's out of tolerance is reported
+without marking the unit failed.
+
 ## New node / repeater alerts
 
 When a node the relay hasn't seen before starts advertising, it posts a line to
@@ -194,6 +297,12 @@ rm seen_nodes.json
   (`/…`) are ignored, and only the configured chat is relayed.
 - **New nodes** — seeds a seen-set from `commands.get_contacts()`, then
   subscribes to `EventType.NEW_CONTACT` and announces first sightings.
+- **Reconnection** — a supervisor loop owns the mesh session: it subscribes to
+  `EventType.DISCONNECTED`, probes with `commands.get_time()`, and rebuilds the
+  session (re-resolving the channel and re-subscribing) after any drop.
+- **Clock checks** — `send_login_sync()` then `send_cmd(dst, "clock")`, with the
+  reply read off `EventType.CONTACT_MSG_RECV`; corrections go out as
+  `send_cmd(dst, "time <epoch>")`.
 
 ## Notes & limits
 
