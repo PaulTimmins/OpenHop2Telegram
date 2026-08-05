@@ -57,6 +57,7 @@ All configuration is via environment variables (or a `.env` file). See
 | `NOTIFY_NEW_NODES` | Alert when a node is seen for the first time | `true` |
 | `NOTIFY_NODE_TYPES` | Which node types to alert on | `all` |
 | `SEEN_NODES_FILE` | Where already-announced nodes are remembered | `seen_nodes.json` |
+| `NODE_POLL_INTERVAL` | Contact-list diff interval for new-node alerts; `0` off | `300` |
 | `TIMESYNC_HOST` / `TIMESYNC_PORT` | Endpoint the maintenance scripts use | falls back to `OPENHOP_*` |
 | `RECONNECT_MIN_DELAY` / `RECONNECT_MAX_DELAY` | Reconnect backoff bounds (seconds) | `5` / `300` |
 | `HEALTHCHECK_INTERVAL` | Liveness probe interval; `0` disables | `120` |
@@ -414,10 +415,30 @@ To deliberately re-announce everything, delete the file:
 rm seen_nodes.json
 ```
 
-> Detection uses the node's `NEW_CONTACT` push, which fires when an advert
-> arrives from a node not already in its contact list. A node that never
-> advertises within range won't be seen — this reports what your radio hears,
-> not the whole mesh.
+### How detection works
+
+Three independent detectors run, because **which push a node emits depends on
+its firmware and auto-add setting**:
+
+1. **`NEW_CONTACT`** (`PUSH_CODE_NEW_ADVERT`) — a full contact record for an
+   unknown node. Emitted when the node leaves adding contacts to the client.
+2. **`ADVERTISEMENT`** — any advert heard, carrying only a public key. A node
+   that auto-adds contacts itself announces this way and may **never** emit the
+   push above, so relying on `NEW_CONTACT` alone misses new nodes entirely.
+   The contact list is consulted to fill in the name and type.
+3. **A periodic contact-list diff** every `NODE_POLL_INTERVAL` seconds
+   (default 300, `0` disables). This is the guarantee: it catches a new node
+   even if no push arrives at all.
+
+Whichever fires first wins; the seen-store keeps it to one alert per node.
+
+If an advert arrives for a node that isn't in the contact list yet and a
+`NOTIFY_NODE_TYPES` filter is active, the alert is **deferred** rather than
+dropped — the type isn't known yet, and recording it as seen would lose the
+alert permanently. It fires once the contact details catch up.
+
+> This reports what your radio hears. A node that never advertises within range
+> won't appear.
 
 ## How it works
 

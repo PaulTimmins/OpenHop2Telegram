@@ -8,7 +8,7 @@ from typing import Optional
 
 from meshcore import MeshCore, EventType
 
-from .config import Config
+from .config import NODE_TYPES, Config
 from .coordination import Coordinator
 from .nodes import SeenNodes, describe, type_code
 from .telegram import TelegramClient
@@ -30,6 +30,7 @@ class Bridge:
         # Set by the DISCONNECTED handler / health check to wake the supervisor.
         self._lost: Optional[asyncio.Event] = None
         self._paused = False
+        self._poll_task: Optional[asyncio.Task] = None
         self._seeded = False
         self._announced_offline = False
 
@@ -162,7 +163,15 @@ class Bridge:
             # while we were offline.
             await self._prime_seen_nodes(announce_summary=not self._seeded)
             self._seeded = True
+            # Three detectors, because which push a node emits depends on its
+            # firmware and auto-add setting: the new-contact push, any advert,
+            # and a periodic diff of the contact list as the guarantee.
             self._mesh.subscribe(EventType.NEW_CONTACT, self._on_new_contact)
+            self._mesh.subscribe(EventType.ADVERTISEMENT, self._on_advertisement)
+            if cfg.node_poll_interval > 0:
+                self._poll_task = asyncio.create_task(
+                    self._poll_new_nodes(), name="node-poll"
+                )
 
         # Auto-fetch pulls queued messages off the node and emits *_MSG_RECV events.
         await self._mesh.start_auto_message_fetching()
@@ -234,6 +243,14 @@ class Bridge:
 
     async def _teardown_session(self) -> None:
         """Drop the current mesh session so the next attempt starts clean."""
+        task, self._poll_task = self._poll_task, None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+
         mesh, self._mesh = self._mesh, None
         if mesh is None:
             return
@@ -338,11 +355,82 @@ class Bridge:
         payload = result.payload
         return payload if isinstance(payload, dict) else {}
 
+    @property
+    def _filtering_by_type(self) -> bool:
+        return len(self._cfg.notify_node_types) < len(NODE_TYPES)
+
     async def _on_new_contact(self, event) -> None:
+        """PUSH_CODE_NEW_ADVERT: a full contact record for an unknown node."""
         contact = event.payload or {}
-        pubkey = contact.get("public_key") or ""
+        await self._consider_node(
+            contact.get("public_key") or "", contact, "new-contact push"
+        )
+
+    async def _on_advertisement(self, event) -> None:
+        """ADVERTISEMENT: any advert heard. Carries only a public key.
+
+        Needed because a node that auto-adds contacts announces adverts this way
+        and may never emit the new-contact push, which would leave new nodes
+        undetected.
+        """
+        pubkey = (event.payload or {}).get("public_key") or ""
+        if not pubkey or pubkey in self._seen:
+            return
+
+        contact = await self._lookup_contact(pubkey)
+        if contact is None and self._filtering_by_type:
+            # An advert alone doesn't say what kind of node this is. With a type
+            # filter active, wait for the contact list to catch up rather than
+            # recording it as seen and losing the alert for good.
+            log.debug("Advert from unknown %s; awaiting contact details", pubkey[:6])
+            return
+
+        await self._consider_node(pubkey, contact or {}, "advert")
+
+    async def _poll_new_nodes(self) -> None:
+        """Backstop: diff the contact list against the store periodically.
+
+        Push notifications differ between firmware and auto-add settings, so
+        polling is what guarantees a new node is noticed at all.
+        """
+        interval = self._cfg.node_poll_interval
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                contacts = await self._fetch_contacts()
+                for pubkey, contact in contacts.items():
+                    if pubkey not in self._seen:
+                        await self._consider_node(pubkey, contact, "contact poll")
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - keep polling regardless
+                log.exception("Node poll failed; will retry")
+
+    async def _lookup_contact(self, pubkey: str) -> Optional[dict]:
+        """Find a contact record for a key, refreshing the list if needed."""
+        if self._mesh is None:
+            return None
+        contacts = getattr(self._mesh, "contacts", None)
+        if isinstance(contacts, dict) and pubkey in contacts:
+            return contacts[pubkey]
+        try:
+            await self._mesh.ensure_contacts(follow=True)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Could not refresh contacts: %s", exc)
+        contacts = getattr(self._mesh, "contacts", None)
+        if isinstance(contacts, dict):
+            return contacts.get(pubkey)
+        return None
+
+    async def _consider_node(self, pubkey: str, contact: dict, source: str) -> None:
+        """Announce a node the first time we're sure about it."""
         if not pubkey:
             return
+
+        # describe() reads the key off the record, so make sure it's there even
+        # when all we had was an advert.
+        contact = dict(contact or {})
+        contact.setdefault("public_key", pubkey)
 
         code = type_code(contact)
         if code not in self._cfg.notify_node_types:
@@ -355,7 +443,7 @@ class Bridge:
             return  # already announced
 
         text = describe(contact)
-        log.info("new node -> tg: %s", text.replace("\n", " | "))
+        log.info("new node via %s -> tg: %s", source, text.replace("\n", " | "))
         if self._tg is not None:
             await self._tg.send_message(text)
 
