@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+import time
 from typing import Optional
 
 from meshcore import MeshCore, EventType
@@ -11,6 +13,7 @@ from meshcore import MeshCore, EventType
 from .config import NODE_TYPES, Config
 from .coordination import Coordinator
 from .nodes import SeenNodes, describe, type_code
+from .wardriving import WardriverLog, format_alert, parse_sighting
 from .telegram import TelegramClient
 
 log = logging.getLogger("relay.bridge")
@@ -31,6 +34,14 @@ class Bridge:
         self._lost: Optional[asyncio.Event] = None
         self._paused = False
         self._poll_task: Optional[asyncio.Task] = None
+        self._wardriving_idx: Optional[int] = None
+        self._wardrivers = WardriverLog(config.wardriving_log_file)
+        self._wardriving_re = (
+            re.compile(config.wardriving_pattern)
+            if config.wardriving_pattern
+            else None
+        )
+        self._wardrivers_loaded = False
         self._seeded = False
         self._announced_offline = False
 
@@ -152,9 +163,13 @@ class Bridge:
             cfg.direction,
         )
 
+        if cfg.wardriving_enabled:
+            await self._setup_wardriving()
+
         # Subscribe before auto-fetch starts, or messages drained in between
-        # arrive with no handler attached and are lost.
-        if cfg.relay_mesh_to_tg:
+        # arrive with no handler attached and are lost. One subscription serves
+        # both the relayed channel and wardriving; the handler routes by index.
+        if cfg.relay_mesh_to_tg or self._wardriving_idx is not None:
             self._mesh.subscribe(EventType.CHANNEL_MSG_RECV, self._on_mesh_message)
 
         if cfg.notify_new_nodes:
@@ -292,11 +307,17 @@ class Bridge:
 
     async def _on_mesh_message(self, event) -> None:
         payload = event.payload or {}
-        if payload.get("channel_idx") != self._channel_idx:
-            return
+        idx = payload.get("channel_idx")
 
         text = (payload.get("text") or "").strip()
         if not text:
+            return
+
+        if self._wardriving_idx is not None and idx == self._wardriving_idx:
+            await self._on_wardriving_message(text)
+            return
+
+        if idx != self._channel_idx or not self._cfg.relay_mesh_to_tg:
             return
 
         sender = self._format_sender(payload)
@@ -490,7 +511,87 @@ class Bridge:
             body = body[: self._cfg.mesh_max_chars - 1].rstrip() + "…"
         return body
 
+    # --- wardriving -------------------------------------------------------
+
+    async def _setup_wardriving(self) -> None:
+        """Locate the wardriving channel, if this node carries one."""
+        cfg = self._cfg
+        if not self._wardrivers_loaded:
+            self._wardrivers.load()
+            # Entries far older than the quiet period can never suppress an
+            # alert again, so don't let the file grow without bound.
+            self._wardrivers.prune(max(cfg.wardriving_quiet_seconds * 24, 86400))
+            self._wardrivers_loaded = True
+
+        self._wardriving_idx = await self._find_channel(cfg.wardriving_channel)
+        if self._wardriving_idx is None:
+            log.info(
+                "No %r channel on this node; wardriver alerts are off. Add the "
+                "channel to the node to enable them.",
+                cfg.wardriving_channel,
+            )
+            return
+
+        log.info(
+            "Watching channel %r (index %d) for wardrivers; alerting when one "
+            "hasn't been heard for %.0fs",
+            cfg.wardriving_channel,
+            self._wardriving_idx,
+            cfg.wardriving_quiet_seconds,
+        )
+
+
+    async def _on_wardriving_message(self, text: str) -> None:
+        """Announce a wardriver we haven't heard from for the quiet period."""
+        # The on-air format isn't specified anywhere, so keep the raw text
+        # available for tuning WARDRIVING_PATTERN against real traffic.
+        log.debug("wardriving raw: %r", text)
+
+        sighting = parse_sighting(text, self._wardriving_re)
+        if sighting is None:
+            log.debug("wardriving: could not read a sender from %r", text)
+            return
+
+        quiet = self._cfg.wardriving_quiet_seconds
+        if not self._wardrivers.is_new_activity(sighting.key, quiet):
+            # Mid-conversation: refresh the timestamp so the quiet period is
+            # measured from their last transmission, not their first.
+            self._wardrivers.record(sighting.key)
+            return
+
+        previous = self._wardrivers.last_seen(sighting.key)
+        self._wardrivers.record(sighting.key)
+
+        alert = format_alert(sighting)
+        log.info(
+            "wardriver -> tg: %s (last heard %s)",
+            alert,
+            "never" if previous is None else f"{int(time.time() - previous)}s ago",
+        )
+        if self._tg is not None:
+            await self._tg.send_message(alert)
+
     # --- channel resolution ----------------------------------------------
+
+    async def _find_channel(self, name: str) -> Optional[int]:
+        """Index of the channel with this name, or None if the node has no such channel."""
+        assert self._mesh is not None
+        wanted = (name or "").strip().lstrip("#").lower()
+        if not wanted:
+            return None
+
+        for idx in range(_MAX_CHANNEL_SCAN):
+            try:
+                result = await self._mesh.commands.get_channel(idx)
+            except Exception:  # noqa: BLE001
+                break
+            if getattr(result, "type", None) == EventType.ERROR:
+                continue
+            payload = result.payload or {}
+            found = (payload.get("channel_name") or payload.get("name") or "").strip()
+            if found.lstrip("#").lower() == wanted:
+                return idx
+        return None
 
     async def _resolve_channel_index(self) -> int:
         """Find the index of the channel whose name matches config, case-insensitively.

@@ -6,6 +6,7 @@
 
 # Runtime state (which nodes have already been announced)
 seen_nodes.json
+wardrivers.json
 
 # Node list for the clock checker — contains admin passwords.
 # (time_sync.example.json is the tracked template.)

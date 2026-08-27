@@ -81,6 +81,11 @@ class Config:
     seen_nodes_file: str
     announce_seed_summary: bool
     node_poll_interval: float
+    wardriving_enabled: bool
+    wardriving_channel: str
+    wardriving_quiet_seconds: float
+    wardriving_log_file: str
+    wardriving_pattern: str
     reconnect_min_delay: float
     reconnect_max_delay: float
     healthcheck_interval: float
@@ -134,6 +139,15 @@ class Config:
                 os.getenv("ANNOUNCE_SEED_SUMMARY", ""), True
             ),
             node_poll_interval=float(os.getenv("NODE_POLL_INTERVAL", "300")),
+            wardriving_enabled=_parse_bool(os.getenv("WARDRIVING_ENABLED", ""), True),
+            wardriving_channel=os.getenv("WARDRIVING_CHANNEL", "wardriving").strip(),
+            wardriving_quiet_seconds=float(
+                os.getenv("WARDRIVING_QUIET_SECONDS", "3600")
+            ),
+            wardriving_log_file=os.getenv(
+                "WARDRIVING_LOG_FILE", "wardrivers.json"
+            ).strip(),
+            wardriving_pattern=os.getenv("WARDRIVING_PATTERN", "").strip(),
             reconnect_min_delay=float(os.getenv("RECONNECT_MIN_DELAY", "5")),
             reconnect_max_delay=float(os.getenv("RECONNECT_MAX_DELAY", "300")),
             healthcheck_interval=float(os.getenv("HEALTHCHECK_INTERVAL", "120")),

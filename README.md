@@ -58,6 +58,9 @@ All configuration is via environment variables (or a `.env` file). See
 | `NOTIFY_NODE_TYPES` | Which node types to alert on | `all` |
 | `SEEN_NODES_FILE` | Where already-announced nodes are remembered | `seen_nodes.json` |
 | `NODE_POLL_INTERVAL` | Contact-list diff interval for new-node alerts; `0` off | `300` |
+| `WARDRIVING_ENABLED` | Watch a channel for wardrivers | `true` |
+| `WARDRIVING_CHANNEL` | Channel to watch | `wardriving` |
+| `WARDRIVING_QUIET_SECONDS` | Only alert after this much silence from them | `3600` |
 | `TIMESYNC_HOST` / `TIMESYNC_PORT` | Endpoint the maintenance scripts use | falls back to `OPENHOP_*` |
 | `RECONNECT_MIN_DELAY` / `RECONNECT_MAX_DELAY` | Reconnect backoff bounds (seconds) | `5` / `300` |
 | `HEALTHCHECK_INTERVAL` | Liveness probe interval; `0` disables | `120` |
@@ -348,6 +351,55 @@ systemctl list-timers openhop-timesync.timer
 Run it once by hand with `sudo systemctl start openhop-timesync.service`. The
 unit sets `SuccessExitStatus=0 1` so a node that's out of tolerance is reported
 without marking the unit failed.
+
+## Wardriver alerts
+
+Watches a channel (default `wardriving`) and posts when a wardriver turns up
+that hasn't been heard for at least `WARDRIVING_QUIET_SECONDS` (default one
+hour):
+
+```
+🛰 Wardriver seen: asdfasdf (asdfasdf234) 82.323423 48.33434
+🛰 Wardriver seen: otherguy
+```
+
+Coordinates appear only when the wardriver broadcasts them — MeshMapper only
+appends GPS to the on-air message when "Broadcast My Coordinates" is on, so the
+second line above is the normal case, not a failure.
+
+The quiet period measures from their **last** transmission, so a wardriver
+working an area for an hour produces one alert, not one per ping. They become
+newsworthy again after an hour of silence. Timestamps persist in
+`WARDRIVING_LOG_FILE`, so restarting the relay doesn't re-announce everyone.
+
+If the node has no such channel, this logs one line at startup and stays off.
+
+### Reading the messages
+
+Channel messages carry **no sender public key** — unlike direct messages, the
+payload is just the channel index, text and timing — so the sender has to be
+identified from the text itself.
+
+The on-air `#wardriving` format isn't formally specified: MeshMapper describes
+it as a short anonymous token, with GPS appended only when the operator opts in.
+So the default parser is deliberately loose — it reads a trailing `lat lon` pair
+as a position (rejecting out-of-range values rather than guessing at ordering)
+and treats the rest as the sender's label, splitting a trailing `(token)` into a
+name and id.
+
+If your local traffic looks different, watch it for a bit:
+
+```bash
+LOG_LEVEL=DEBUG journalctl -u openhop-telegram-relay -f | grep "wardriving raw"
+```
+
+then set a regex with named groups `name`, `id`, `lat`, `lon`:
+
+```bash
+WARDRIVING_PATTERN=^WD\|(?P<id>\w+)\|(?P<name>[^|]+)$
+```
+
+Messages that don't parse are ignored rather than alerted on.
 
 ## New node / repeater alerts
 
