@@ -63,7 +63,7 @@ All configuration is via environment variables (or a `.env` file). See
 | `WARDRIVING_QUIET_SECONDS` | Only alert after this much silence from them | `3600` |
 | `TIMESYNC_HOST` / `TIMESYNC_PORT` | Endpoint the maintenance scripts use | falls back to `OPENHOP_*` |
 | `RECONNECT_MIN_DELAY` / `RECONNECT_MAX_DELAY` | Reconnect backoff bounds (seconds) | `5` / `300` |
-| `HEALTHCHECK_INTERVAL` | Liveness probe interval; `0` disables | `120` |
+| `HEALTHCHECK_INTERVAL` | Liveness probe + keepalive interval; `0` disables | `45` |
 | `NOTIFY_CONNECTION_EVENTS` | Tell the chat when the link drops/returns | `true` |
 
 ### Getting the chat ID

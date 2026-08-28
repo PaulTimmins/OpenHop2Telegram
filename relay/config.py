@@ -150,7 +150,7 @@ class Config:
             wardriving_pattern=os.getenv("WARDRIVING_PATTERN", "").strip(),
             reconnect_min_delay=float(os.getenv("RECONNECT_MIN_DELAY", "5")),
             reconnect_max_delay=float(os.getenv("RECONNECT_MAX_DELAY", "300")),
-            healthcheck_interval=float(os.getenv("HEALTHCHECK_INTERVAL", "120")),
+            healthcheck_interval=float(os.getenv("HEALTHCHECK_INTERVAL", "45")),
             notify_connection_events=_parse_bool(
                 os.getenv("NOTIFY_CONNECTION_EVENTS", ""), True
             ),

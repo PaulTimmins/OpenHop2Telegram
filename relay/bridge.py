@@ -237,6 +237,12 @@ class Bridge:
 
         A TCP session can stay open while the node stops answering (this is what
         a silent stall looks like), so waiting for a socket error isn't enough.
+
+        This doubles as a keepalive: OpenHop drops companion clients that go
+        quiet (`idle_timeout`), and on an otherwise idle channel this probe is
+        the only traffic. HEALTHCHECK_INTERVAL therefore has to stay comfortably
+        below the node's idle timeout, or the node hangs up and the relay
+        rebuilds the session every couple of minutes for no reason.
         """
         if self._mesh is None:
             return False
@@ -620,11 +626,31 @@ class Bridge:
                 return idx
 
         log.warning(
-            "Could not resolve channel %r by name; using index %d",
+            "Could not resolve channel %r by name; using index %d. "
+            "This node's channels are: %s",
             self._cfg.channel_name,
             self._cfg.channel_index,
+            await self._channel_names() or "(none found)",
         )
         return self._cfg.channel_index
+
+    async def _channel_names(self) -> str:
+        """Names of the channels this node carries, for diagnostics."""
+        if self._mesh is None:
+            return ""
+        found = []
+        for idx in range(_MAX_CHANNEL_SCAN):
+            try:
+                result = await self._mesh.commands.get_channel(idx)
+            except Exception:  # noqa: BLE001
+                break
+            if getattr(result, "type", None) == EventType.ERROR:
+                continue
+            payload = result.payload or {}
+            name = (payload.get("channel_name") or payload.get("name") or "").strip()
+            if name:
+                found.append(f"{idx}={name!r}")
+        return ", ".join(found)
 
     # --- teardown ---------------------------------------------------------
 

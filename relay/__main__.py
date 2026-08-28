@@ -7,14 +7,12 @@ import logging
 
 from .bridge import Bridge
 from .config import Config
+from .logging_setup import configure
 
 
 def main() -> None:
     cfg = Config.from_env()
-    logging.basicConfig(
-        level=getattr(logging, cfg.log_level, logging.INFO),
-        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
-    )
+    configure(cfg.log_level)
     try:
         asyncio.run(Bridge(cfg).run())
     except KeyboardInterrupt:

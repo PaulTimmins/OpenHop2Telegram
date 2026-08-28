@@ -27,6 +27,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from meshcore import MeshCore  # noqa: E402
 
 from relay.config import Config  # noqa: E402
+from relay.logging_setup import configure  # noqa: E402
 from relay.coordination import Coordinator  # noqa: E402
 from relay.metrics import MetricsCollector, MetricsWriter  # noqa: E402
 from relay.nodes import SeenNodes  # noqa: E402
@@ -274,10 +275,7 @@ async def run(args: argparse.Namespace) -> int:
 
 def main() -> None:
     args = parse_args()
-    logging.basicConfig(
-        level=getattr(logging, args.log_level.upper(), logging.INFO),
-        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
-    )
+    configure(args.log_level)
     try:
         raise SystemExit(asyncio.run(run(args)))
     except KeyboardInterrupt:
