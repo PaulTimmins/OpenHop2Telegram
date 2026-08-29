@@ -86,6 +86,7 @@ class Config:
     wardriving_quiet_seconds: float
     wardriving_log_file: str
     wardriving_pattern: str
+    wardriving_min_alert_gap: float
     reconnect_min_delay: float
     reconnect_max_delay: float
     healthcheck_interval: float
@@ -148,6 +149,9 @@ class Config:
                 "WARDRIVING_LOG_FILE", "wardrivers.json"
             ).strip(),
             wardriving_pattern=os.getenv("WARDRIVING_PATTERN", "").strip(),
+            wardriving_min_alert_gap=float(
+                os.getenv("WARDRIVING_MIN_ALERT_GAP", "0")
+            ),
             reconnect_min_delay=float(os.getenv("RECONNECT_MIN_DELAY", "5")),
             reconnect_max_delay=float(os.getenv("RECONNECT_MAX_DELAY", "300")),
             healthcheck_interval=float(os.getenv("HEALTHCHECK_INTERVAL", "45")),

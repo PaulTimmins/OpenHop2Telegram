@@ -42,6 +42,7 @@ class Bridge:
             else None
         )
         self._wardrivers_loaded = False
+        self._last_wardriver_alert = 0.0
         self._seeded = False
         self._announced_offline = False
 
@@ -562,17 +563,42 @@ class Bridge:
         if not self._wardrivers.is_new_activity(sighting.key, quiet):
             # Mid-conversation: refresh the timestamp so the quiet period is
             # measured from their last transmission, not their first.
+            log.debug("wardriving: %r still within the quiet period", sighting.key)
             self._wardrivers.record(sighting.key)
             return
 
         previous = self._wardrivers.last_seen(sighting.key)
         self._wardrivers.record(sighting.key)
 
+        # Blunt channel-wide floor. Per-wardriver tracking depends on the sender
+        # being identifiable from the text; if the token varies per transmission
+        # every ping looks like a new wardriver, and this caps the noise until a
+        # WARDRIVING_PATTERN pins down the stable part.
+        gap = self._cfg.wardriving_min_alert_gap
+        if gap > 0:
+            since = time.time() - self._last_wardriver_alert
+            if since < gap:
+                log.info(
+                    "wardriver alert suppressed by WARDRIVING_MIN_ALERT_GAP "
+                    "(%.0fs of %.0fs): key=%r raw=%r",
+                    since,
+                    gap,
+                    sighting.key,
+                    sighting.raw,
+                )
+                return
+        self._last_wardriver_alert = time.time()
+
         alert = format_alert(sighting)
+        # Log the identity we derived next to the raw text. If alerts repeat far
+        # sooner than the quiet period, it is almost always because the sender's
+        # token varies per transmission, and that shows up here as a different
+        # key for the same wardriver.
         log.info(
-            "wardriver -> tg: %s (last heard %s)",
-            alert,
+            "wardriver alert: key=%r last_heard=%s raw=%r",
+            sighting.key,
             "never" if previous is None else f"{int(time.time() - previous)}s ago",
+            sighting.raw,
         )
         if self._tg is not None:
             await self._tg.send_message(alert)
