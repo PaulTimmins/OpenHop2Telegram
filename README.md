@@ -380,9 +380,20 @@ Channel messages carry **no sender public key** — unlike direct messages, the
 payload is just the channel index, text and timing — so the sender has to be
 identified from the text itself.
 
-The on-air `#wardriving` format isn't formally specified: MeshMapper describes
-it as a short anonymous token, with GPS appended only when the operator opts in.
-So the default parser is deliberately loose — it reads a trailing `lat lon` pair
+MeshMapper's format is recognised natively:
+
+```
+Mobile MESHCORE Celsius100: MM:fJnLLO4CAQ:42.52127,-83.09792
+<name>: MM:<wire tag>[:<lat>,<lon>]
+```
+
+**The wire tag changes on every transmission** — it identifies the ping, not the
+operator — so the *name* is what alerts are keyed on. Keying on the tag would
+make every ping look like a wardriver you'd never heard, which is the one
+mistake that turns an hourly alert into one every few minutes. The tag is still
+shown, since it's useful for matching an alert to a specific ping.
+
+For anything that isn't that format, the fallback parser is deliberately loose — it reads a trailing `lat lon` pair
 as a position (rejecting out-of-range values rather than guessing at ordering)
 and treats the rest as the sender's label, splitting a trailing `(token)` into a
 name and id.

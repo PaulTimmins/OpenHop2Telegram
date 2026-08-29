@@ -35,6 +35,16 @@ _COORD_RE = re.compile(
     r"\s*[)\]]?\s*$"
 )
 
+# The MeshMapper format seen in the wild:
+#   "Mobile MESHCORE Celsius100: MM:fJnLLO4CAQ:42.52127,-83.09792"
+#   "<name>: MM:<wire tag>[:<lat>,<lon>]"
+# The wire tag is regenerated for every ping, so it identifies the transmission
+# rather than the operator — the name is the part that stays put.
+_MESHMAPPER_RE = re.compile(
+    r"^(?P<name>.+?)\s*:\s*MM:(?P<ident>[A-Za-z0-9+/=_-]+)"
+    r"(?::\s*(?P<lat>[-+]?\d{1,3}\.\d+)\s*,\s*(?P<lon>[-+]?\d{1,3}\.\d+))?\s*$"
+)
+
 # A trailing "(token)" or "[token]" after the name.
 _TAG_RE = re.compile(r"^(?P<name>.*?)[\s]*[\(\[](?P<ident>[^)\]]+)[\)\]]\s*$")
 
@@ -54,8 +64,13 @@ class Sighting:
 
     @property
     def key(self) -> str:
-        """Stable identity used for the quiet-period check."""
-        return (self.ident or self.name).strip().lower()
+        """Identity used for the quiet-period check.
+
+        The name is preferred over the token: MeshMapper's wire tag changes on
+        every transmission, so keying on it would make each ping look like a
+        wardriver never heard before. A name is what an operator keeps.
+        """
+        return (self.name or self.ident).strip().lower()
 
     @property
     def has_position(self) -> bool:
@@ -84,6 +99,15 @@ def parse_sighting(text: str, pattern: Optional[re.Pattern] = None) -> Optional[
         if not (name or ident):
             return None
         return Sighting(name or ident, ident or name, lat, lon, raw)
+
+    mm = _MESHMAPPER_RE.match(raw)
+    if mm:
+        lat, lon = _floats(mm.group("lat"), mm.group("lon"))
+        if lat is None or lon is None or not _valid_position(lat, lon):
+            lat = lon = None
+        name = mm.group("name").strip()
+        if name:
+            return Sighting(name, mm.group("ident").strip(), lat, lon, raw)
 
     body = raw
     lat = lon = None
