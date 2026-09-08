@@ -474,9 +474,15 @@ class NodeTimeSync:
     async def _login_once(self, contact: Any, password: str, label: str):
         """One login attempt. None means nothing answered."""
         commands = self._mesh.commands
+        # send_login logs an advisory steering callers to send_login_sync, which
+        # we deliberately avoid: it waits only for LOGIN_SUCCESS and so can't
+        # tell a refusal from silence. _send_login_raw is exactly what
+        # send_login calls, without the advisory; fall back if it's renamed.
+        send = getattr(commands, "_send_login_raw", None) or commands.send_login
+
         try:
             sent = await asyncio.wait_for(
-                commands.send_login(contact, password),
+                send(contact, password),
                 timeout=self._cfg.reply_timeout,
             )
         except asyncio.TimeoutError:
