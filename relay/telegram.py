@@ -44,6 +44,24 @@ class TelegramClient:
         except Exception as exc:  # noqa: BLE001 - never let one send kill the relay
             log.warning("Failed to send message to Telegram: %s", exc)
 
+    async def send_photo(
+        self, image: bytes, *, caption: str = "", filename: str = "chart.png"
+    ) -> None:
+        """Upload an image. Falls back to the caption alone if it's rejected."""
+        try:
+            resp = await self._client.post(
+                f"{self._base}/sendPhoto",
+                data={"chat_id": self._chat_id, "caption": caption[:1024]},
+                files={"photo": (filename, image, "image/png")},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if not data.get("ok"):
+                raise RuntimeError(data)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Photo upload failed (%s); sending text instead", exc)
+            await self.send_message(caption)
+
     async def poll_messages(self) -> AsyncIterator[dict]:
         """Yield incoming message objects for the configured chat, forever.
 

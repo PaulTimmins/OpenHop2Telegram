@@ -1,3 +1,7 @@
 meshcore>=1.1.0
 httpx>=0.27
 python-dotenv>=1.0
+
+# Optional: /battery sends a plotted chart when this is installed,
+# and a text sparkline when it isn't.
+# matplotlib>=3.7

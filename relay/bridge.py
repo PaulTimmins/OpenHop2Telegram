@@ -11,6 +11,7 @@ from typing import Optional
 from meshcore import MeshCore, EventType
 
 from .config import NODE_TYPES, Config
+from .commands import CommandRouter
 from .coordination import Coordinator
 from .nodes import SeenNodes, describe, type_code
 from .wardriving import WardriverLog, format_alert, parse_sighting
@@ -46,6 +47,16 @@ class Bridge:
         self._seeded = False
         self._announced_offline = False
         self._warned_store = False
+        self._commands = (
+            CommandRouter(
+                store=self._seen,
+                telegram=None,  # set once the client exists
+                mesh_getter=lambda: self._mesh,
+                metrics_path=config.metrics_csv,
+            )
+            if config.commands_enabled
+            else None
+        )
 
     async def run(self) -> None:
         cfg = self._cfg
@@ -53,6 +64,10 @@ class Bridge:
         self._tg = TelegramClient(cfg.telegram_bot_token, cfg.telegram_chat_id)
         me = await self._tg.get_me()
         log.info("Telegram connected as @%s", me.get("username", "?"))
+
+        if self._commands is not None:
+            self._commands._tg = self._tg
+            log.info("Slash commands enabled (/help for the list)")
 
         # Lets maintenance tools tell that a relay is holding the node.
         self._coord.write_pid()
@@ -538,8 +553,16 @@ class Bridge:
         assert self._tg is not None
         async for message in self._tg.poll_messages():
             text = (message.get("text") or "").strip()
-            if not text or text.startswith("/"):
-                continue  # skip empty messages and bot commands
+            if not text:
+                continue
+
+            # Commands are handled here rather than relayed. An unrecognised
+            # one is left alone in case another bot in the group owns it, and
+            # is not put on the mesh either.
+            if text.startswith("/"):
+                if self._commands is not None:
+                    await self._commands.handle(text)
+                continue
 
             # This task outlives any single mesh session, so the node may be
             # down right now. Say so rather than dropping the message silently.

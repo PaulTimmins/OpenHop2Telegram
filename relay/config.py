@@ -92,6 +92,8 @@ class Config:
     healthcheck_interval: float
     notify_connection_events: bool
     lock_dir: str
+    commands_enabled: bool
+    metrics_csv: str
     # Endpoint the maintenance scripts use. Defaults to the relay's, but can
     # point somewhere else (a second companion port, a proxy, another node) so
     # the scripts don't share the relay's message queue.
@@ -159,6 +161,8 @@ class Config:
                 os.getenv("NOTIFY_CONNECTION_EVENTS", ""), True
             ),
             lock_dir=os.getenv("LOCK_DIR", ".").strip() or ".",
+            commands_enabled=_parse_bool(os.getenv("COMMANDS_ENABLED", ""), True),
+            metrics_csv=os.getenv("METRICS_CSV", "metrics.csv").strip(),
             timesync_host=(
                 os.getenv("TIMESYNC_HOST", "").strip()
                 or os.getenv("OPENHOP_HOST", "127.0.0.1").strip()

@@ -145,6 +145,48 @@ sudo chmod 600 /opt/openhop-telegram-relay/.env
 > On macOS there is no systemd — use a `launchd` plist (or just run `python -m relay`
 > in a `tmux`/`screen` session) instead.
 
+## Chat commands
+
+Answered in the configured chat:
+
+| Command | Does |
+| --- | --- |
+| `/nodes [filter]` | Known nodes, most recently heard first. Filter by name or type (`/nodes rep`). |
+| `/battery [node] [days]` | Battery trend from the metrics log (`/battery rogue 3`). |
+| `/telemetry <node>` | Ask a node for a live status + telemetry reading. |
+| `/help` | The list above. |
+
+`/battery` sends a plotted PNG when `matplotlib` is installed, and a unicode
+sparkline with min/max/change when it isn't — so it works either way:
+
+```bash
+pip install matplotlib     # optional
+```
+
+It reads `METRICS_CSV`, which must point at the same file the clock checker
+writes with `--metrics`, or there will be nothing to plot. Rows with a blank
+battery are skipped rather than plotted as zero, since a gap means the node
+didn't answer, not that it went flat.
+
+`/telemetry` is the only one that costs airtime — it queries the node there and
+then. It resolves a name or key prefix, never picks a key marked superseded, and
+says so plainly if the node doesn't answer.
+
+Commands are handled instead of being relayed, so they never reach the mesh. An
+**unrecognised** command is left alone entirely, in case another bot in the group
+owns it. Anyone who can post in the chat can run these; set
+`COMMANDS_ENABLED=false` to turn them off.
+
+Register them with [@BotFather](https://t.me/BotFather) (`/setcommands`) to get
+autocomplete in Telegram:
+
+```
+nodes - known nodes, newest first
+battery - battery trend from the metrics log
+telemetry - ask a node for a live reading
+help - list commands
+```
+
 ## Reconnection
 
 The relay reconnects on its own and **retries indefinitely**, backing off from

@@ -9,7 +9,9 @@ import logging
 # survives in logs that get shared when asking for help. Nothing below WARNING
 # from these libraries is worth that, so they stay quiet regardless of our own
 # level, including at DEBUG.
-_NOISY = ("httpx", "httpcore")
+# matplotlib chatters at INFO while building its font cache the first time a
+# chart is rendered, which would otherwise land in the journal.
+_NOISY = ("httpx", "httpcore", "matplotlib", "PIL")
 
 
 def configure(level: str) -> None:
