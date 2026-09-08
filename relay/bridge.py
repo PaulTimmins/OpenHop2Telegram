@@ -490,6 +490,18 @@ class Bridge:
             try:
                 await asyncio.sleep(interval)
                 contacts = await self._fetch_contacts()
+                if not contacts:
+                    # An empty result means the request failed, not that the
+                    # node forgot everyone; reconciling against it would be
+                    # destructive.
+                    continue
+
+                # Reconcile both ways, not just additions. Doing this on the
+                # poll rather than only at startup means a stale superseded
+                # record clears itself within one interval instead of waiting
+                # for the next restart.
+                self._seen.drop_missing_superseded(contacts)
+
                 for pubkey, contact in contacts.items():
                     if pubkey not in self._seen:
                         # Found in the contact list, not heard directly — the
