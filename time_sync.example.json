@@ -31,6 +31,15 @@
   "attempts": 3,
   "retry_delay": 5,
   "reset_path_on_retry": true,
+  "_conflicts": [
+    "remove_conflicts_after_days: when a name maps to two keys and the older",
+    "  one has been silent this long, ask the node to forget it. A reflashed",
+    "  node leaves a dead key behind that keeps shadowing the live one in the",
+    "  node's own contact list. Both conditions are required: a conflict, and",
+    "  weeks of silence -- a quiet-but-live node is never removed, and an old",
+    "  node with no name conflict is never touched. 0 disables removal."
+  ],
+  "remove_conflicts_after_days": 14,
   "_discovery": [
     "metrics_for_known_nodes: also sample every node the relay has discovered",
     "  (from seen_nodes.json), without listing it here. Telemetry needs no",

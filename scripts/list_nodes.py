@@ -136,6 +136,7 @@ def merge(store: SeenNodes, contacts: dict) -> list[dict]:
                 "lon": contact.get("adv_lon") or record.get("lon"),
                 "in_store": key in store,
                 "on_node": key in contacts,
+                "superseded_by": record.get("superseded_by"),
             }
         )
 
@@ -164,8 +165,12 @@ def print_table(rows: list[dict], configured: set[str]) -> None:
         known = (r["name"] or "").strip().lower() in configured or any(
             r["pubkey"].startswith(c) for c in configured if c
         )
+        name = r["name"] or "(unnamed)"
+        if r.get("superseded_by"):
+            # Dead key retained so it isn't announced as new again.
+            name = f"{name} (superseded)"
         print(
-            f"{(r['name'] or '(unnamed)')[:25]:<26} "
+            f"{name[:25]:<26} "
             f"{(r['type_label'] or '?')[:11]:<12} "
             f"{r['pubkey'][:12]:<14} "
             f"{ago(r['last_advert']):<12} "

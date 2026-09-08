@@ -104,6 +104,9 @@ class SyncConfig:
     attempts: int = 3
     retry_delay: float = 5.0
     reset_path_on_retry: bool = True
+    # Days of silence before a conflicting contact is removed from the
+    # node. 0 disables removal entirely.
+    remove_conflicts_after_days: float = 14.0
 
     @classmethod
     def from_dict(cls, raw: dict) -> "SyncConfig":
@@ -130,6 +133,9 @@ class SyncConfig:
             attempts=max(1, int(raw.get("attempts", 3))),
             retry_delay=float(raw.get("retry_delay", 5.0)),
             reset_path_on_retry=bool(raw.get("reset_path_on_retry", True)),
+            remove_conflicts_after_days=float(
+                raw.get("remove_conflicts_after_days", 14.0)
+            ),
         )
 
 
@@ -228,6 +234,8 @@ class NodeTimeSync:
         extra: list[NodeResult] = []
 
         for pubkey, record in (self._store.nodes or {}).items():
+            if record.get("superseded_by"):
+                continue  # a dead key kept only to avoid re-announcing it
             code = (record.get("type") or "").upper()
             if code not in self._cfg.metrics_node_types:
                 continue

@@ -17,6 +17,14 @@ from typing import Any, Optional
 
 log = logging.getLogger("relay.nodes")
 
+# Compared structurally so this module needn't import meshcore just for it.
+try:  # pragma: no cover - trivial import guard
+    from meshcore import EventType as _EventType
+
+    EVENT_ERROR = _EventType.ERROR
+except Exception:  # pragma: no cover
+    EVENT_ERROR = object()
+
 # Index matches the `type` byte on a contact record; see CONTACT_TYPENAMES in
 # meshcore's parser ("NONE", "CLI", "REP", "ROOM", "SENS").
 TYPE_CODES = {0: "NONE", 1: "CLI", 2: "REP", 3: "ROOM", 4: "SENS"}
@@ -240,6 +248,12 @@ class SeenNodes:
         if not matches:
             return None
 
+        # A superseded entry is a dead key kept only so it isn't re-announced;
+        # never resolve a name to it while a live match exists.
+        live = [kv for kv in matches if not kv[1].get("superseded_by")]
+        if live:
+            matches = live
+
         if len(matches) > 1:
             matches.sort(key=lambda kv: self.recency(kv[1]), reverse=True)
             log.info(
@@ -251,17 +265,21 @@ class SeenNodes:
         return matches[0]
 
     def dedupe_by_name(self, min_gap: float = 86400.0) -> int:
-        """Drop older duplicates of a name, keeping the most recently heard.
+        """Mark older duplicates of a name as superseded by the newest.
 
         A name collision almost always means the node was reflashed: the old key
         is dead and will never advertise again, but it still shadows the live one
         in name lookups.
 
+        The stale entry is *marked*, not deleted. The node's own contact list
+        still holds that key, so removing it from the store would make the next
+        reconciliation see an unknown contact and announce the dead node as new
+        — then mark it again on the following start, once per restart forever.
+        Keeping the record means it stays known; `find` just stops choosing it.
+
         Only duplicates at least `min_gap` seconds behind the survivor are
-        dropped. Two nodes that are both currently active but happen to share a
-        name are genuinely two nodes; deleting one would re-announce it as new
-        the next time it advertised, and then delete it again. Those are left
-        alone, and `find` picking the most recent handles the ambiguity.
+        marked. Two nodes both currently active genuinely are two nodes, and
+        `find` picking the most recent handles that ambiguity on its own.
         """
         by_name: dict[str, list[str]] = {}
         for key, record in self._nodes.items():
@@ -277,29 +295,42 @@ class SeenNodes:
             keep = keys[0]
             newest = self.recency(self._nodes[keep])
             stale = [
-                k for k in keys[1:] if newest - self.recency(self._nodes[k]) >= min_gap
+                k
+                for k in keys[1:]
+                if newest - self.recency(self._nodes[k]) >= min_gap
+                and self._nodes[k].get("superseded_by") != keep
             ]
             if not stale:
                 log.debug(
-                    "%r maps to %d nodes, all recently active; keeping both",
-                    name,
-                    len(keys),
+                    "%r maps to %d nodes; nothing new to supersede", name, len(keys)
                 )
                 continue
             log.info(
-                "Keeping %s for %r and dropping %d stale duplicate(s): %s",
-                keep[:12],
+                "%r resolves to %s; superseding %d stale duplicate(s): %s",
                 name,
+                keep[:12],
                 len(stale),
                 ", ".join(k[:12] for k in stale),
             )
             for key in stale:
-                del self._nodes[key]
+                self._nodes[key]["superseded_by"] = keep
                 dropped += 1
 
         if dropped:
             self._save()
         return dropped
+
+    def forget(self, pubkey: str) -> bool:
+        """Drop a record entirely. Only safe once the node no longer holds it."""
+        if pubkey not in self._nodes:
+            return False
+        del self._nodes[pubkey]
+        self._save()
+        return True
+
+    def superseded(self) -> dict[str, dict]:
+        """Records marked as replaced by a newer key of the same name."""
+        return {k: v for k, v in self._nodes.items() if v.get("superseded_by")}
 
     def add(
         self, pubkey: str, contact: Optional[dict] = None, *, heard: bool = True
@@ -427,3 +458,101 @@ class SeenNodes:
                 )
             else:
                 log.debug("Node store still unwritable: %s", exc)
+
+
+async def remove_superseded_contacts(
+    mesh: Any,
+    store: SeenNodes,
+    *,
+    dry_run: bool = False,
+    older_than: float = 14 * 86400,
+) -> list[tuple[str, str, str]]:
+    """Ask the node to forget conflicting contacts that went silent weeks ago.
+
+    Marking a duplicate superseded stops it winning name lookups here, but the
+    dead key stays in the node's contact list, where it keeps shadowing the live
+    one for anything that asks the node directly. Removing it there is the
+    actual cleanup.
+
+    Two conditions must both hold, because either alone would be too eager:
+
+    * the key is **superseded** — a same-named key at least a day newer exists,
+      so this is a real conflict rather than an idle node; and
+    * it hasn't been heard from in `older_than` seconds, so a node that is
+      merely quiet for a few days is left alone.
+
+    A successful removal also drops the record, since the node can no longer
+    offer the key back and re-announce it as new.
+
+    Returns (pubkey, name, outcome) for each one considered.
+    """
+    if older_than <= 0:
+        return []
+    contacts = getattr(mesh, "contacts", None)
+    if not isinstance(contacts, dict):
+        log.warning("No contact list available; not removing anything")
+        return []
+
+    remove = getattr(getattr(mesh, "commands", None), "remove_contact", None)
+    if remove is None:
+        log.warning("This meshcore version can't remove contacts")
+        return []
+
+    now = time.time()
+    results: list[tuple[str, str, str]] = []
+    for pubkey, record in store.superseded().items():
+        name = record.get("name") or pubkey[:12]
+        if pubkey not in contacts:
+            log.debug("%s (%s): already gone from the node", name, pubkey[:12])
+            continue
+
+        # A conflicting key that is still transmitting is not ours to delete.
+        age = now - store.recency(record)
+        if age < older_than:
+            log.debug(
+                "%s (%s): conflicting but heard %.1f days ago; leaving it",
+                name,
+                pubkey[:12],
+                age / 86400,
+            )
+            continue
+
+        if dry_run:
+            log.info(
+                "Would ask the node to forget %s (%s): superseded by %s and "
+                "silent for %.0f days",
+                name,
+                pubkey[:12],
+                (record.get("superseded_by") or "")[:12],
+                age / 86400,
+            )
+            results.append((pubkey, name, "would remove"))
+            continue
+
+        try:
+            result = await remove(contacts[pubkey])
+        except Exception as exc:  # noqa: BLE001 - one failure must not stop the rest
+            log.warning("Could not remove %s (%s): %s", name, pubkey[:12], exc)
+            results.append((pubkey, name, f"failed: {exc}"))
+            continue
+
+        if getattr(result, "type", None) == EVENT_ERROR:
+            log.warning(
+                "Node refused to remove %s (%s): %s",
+                name,
+                pubkey[:12],
+                getattr(result, "payload", None),
+            )
+            results.append((pubkey, name, "refused"))
+            continue
+
+        log.info(
+            "Node forgot %s (%s): superseded and silent for %.0f days",
+            name,
+            pubkey[:12],
+            age / 86400,
+        )
+        store.forget(pubkey)
+        results.append((pubkey, name, "removed"))
+
+    return results

@@ -518,6 +518,17 @@ dead one — and a lookup by name could hand the clock checker the dead key, whi
 just times out. On load, the older of two same-named entries is dropped, keeping
 the most recently heard.
 
+**A long-dead conflicting key is removed from the node.** Marking it superseded
+only fixes lookups here; the dead key stays in the node's own contact list,
+shadowing the live one for anything that asks the node directly. So when a name
+maps to two keys and the older one has been **silent for weeks**
+(`remove_conflicts_after_days`, default 14, `0` disables), the clock checker asks
+the node to forget it. Both conditions are required — a quiet but live node is
+never removed, and an old node with no name conflict is never touched. The
+marking is kept rather than the record deleted until that point, because the node
+would otherwise offer the key straight back and it would be announced as new
+again on every restart.
+
 Recency is deliberately based on **advert evidence only**: `last_advert` (the
 node's own record of that contact's last advert) and `last_seen` (our timestamp
 from actually observing one). Nothing stamps a node as recently active just

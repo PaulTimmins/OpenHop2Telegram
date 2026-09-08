@@ -30,7 +30,7 @@ from relay.config import Config  # noqa: E402
 from relay.logging_setup import configure  # noqa: E402
 from relay.coordination import Coordinator  # noqa: E402
 from relay.metrics import MetricsCollector, MetricsWriter  # noqa: E402
-from relay.nodes import SeenNodes  # noqa: E402
+from relay.nodes import SeenNodes, remove_superseded_contacts  # noqa: E402
 from relay.telegram import TelegramClient  # noqa: E402
 from relay.timesync import (  # noqa: E402
     NodeTimeSync,
@@ -262,6 +262,17 @@ async def run(args: argparse.Namespace) -> int:
         store = SeenNodes(args.store or cfg.seen_nodes_file)
         store.load()
         store.dedupe_by_name()
+
+        # Housekeeping: a conflicting key that has been silent for weeks only
+        # shadows the live node of the same name, so ask the node to drop it.
+        removals = await remove_superseded_contacts(
+            mesh,
+            store,
+            dry_run=args.dry_run,
+            older_than=sync_cfg.remove_conflicts_after_days * 86400,
+        )
+        for pubkey, name, outcome in removals:
+            print(f"  {outcome}: conflicting contact {name} ({pubkey[:12]})")
 
         results = await NodeTimeSync(
             mesh,
