@@ -374,8 +374,15 @@ class NodeTimeSync:
                 f"or check --host/--port point at the right companion endpoint"
             )
 
+        # Choose among ALL contacts with this name rather than taking the
+        # library's first match: it can hand back a key the store knows is
+        # superseded, or one we just asked the node to forget.
+        contact = self._best_named_contact(spec.name)
+        if contact is not None:
+            return contact
+
         contact = self._mesh.get_contact_by_name(spec.name)
-        if contact:
+        if contact and not self._is_superseded(self._pubkey_of(contact)):
             return contact
 
         # Fall back to the relay's node store: it may know this name from an
@@ -405,6 +412,40 @@ class NodeTimeSync:
             f"name exactly — run scripts/list_nodes.py to see what's known"
             f"{self._endpoint_hint()}"
         )
+
+    def _best_named_contact(self, name: str) -> Any:
+        """The live contact with this advertised name, most recent if several."""
+        contacts = getattr(self._mesh, "contacts", None)
+        if not isinstance(contacts, dict):
+            return None
+        wanted = (name or "").strip().lower()
+        if not wanted:
+            return None
+
+        matches = [
+            (key, contact)
+            for key, contact in contacts.items()
+            if (contact.get("adv_name") or "").strip().lower() == wanted
+            and not self._is_superseded(key)
+        ]
+        if not matches:
+            return None
+        if len(matches) > 1:
+            matches.sort(key=lambda kv: kv[1].get("last_advert") or 0, reverse=True)
+            log.info(
+                "%s: %d contacts share this name; using the most recent (%s)",
+                name,
+                len(matches),
+                matches[0][0][:12],
+            )
+        return matches[0][1]
+
+    def _is_superseded(self, pubkey: str) -> bool:
+        """Whether the store has recorded this key as replaced by a newer one."""
+        if not pubkey or self._store is None:
+            return False
+        record = self._store.get(pubkey)
+        return bool(record and record.get("superseded_by"))
 
     def _contact_count(self) -> int:
         contacts = getattr(self._mesh, "contacts", None)

@@ -552,6 +552,9 @@ async def remove_superseded_contacts(
             pubkey[:12],
             age / 86400,
         )
+        # Keep the in-memory contact list honest: anything still holding the
+        # removed key would try to address a contact the node no longer has.
+        contacts.pop(pubkey, None)
         store.forget(pubkey)
         results.append((pubkey, name, "removed"))
 
