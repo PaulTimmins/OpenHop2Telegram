@@ -76,7 +76,7 @@ class SeenNodes:
     again.
     """
 
-    VERSION = 2
+    VERSION = 3
 
     def __init__(self, path: str | os.PathLike[str]):
         self._path = Path(path)
@@ -101,7 +101,25 @@ class SeenNodes:
     def _parse(cls, raw: Any) -> dict[str, dict]:
         nodes = raw.get("nodes")
         if isinstance(nodes, dict):
-            return {str(k): dict(v) for k, v in nodes.items() if isinstance(v, dict)}
+            parsed = {
+                str(k): dict(v) for k, v in nodes.items() if isinstance(v, dict)
+            }
+            if int(raw.get("version") or 0) < 3:
+                # Up to v2, last_seen was stamped whenever a node was recorded,
+                # including from the node's contact list, so it says nothing
+                # about the node still being alive. Drop it and fall back to
+                # last_advert; real observations will repopulate it.
+                cleared = 0
+                for record in parsed.values():
+                    if record.pop("last_seen", None) is not None:
+                        cleared += 1
+                if cleared:
+                    log.info(
+                        "Upgrading node store: cleared %d unreliable last_seen "
+                        "value(s); recency now comes from advert data",
+                        cleared,
+                    )
+            return parsed
 
         # v1: {"seen": ["<pubkey>", ...]} — keep the keys, names unknown.
         legacy = raw.get("seen")
@@ -130,14 +148,30 @@ class SeenNodes:
 
     @staticmethod
     def recency(record: dict) -> float:
-        """How recently this node was heard from.
+        """When this node was last known to have advertised.
 
-        Takes the latest of the two timestamps: `last_advert` comes from the
-        node itself and can be wildly wrong if its clock is off, while
-        `last_seen` is ours.
+        Both inputs are advert evidence: `last_advert` is the node's own record
+        of the contact's last advert, and `last_seen` is our timestamp from
+        actually observing one. Neither is written merely because a node appears
+        in a contact list, or a dead node would look alive forever and never be
+        pruned.
+
+        A node with a fast clock can report an advert time in the future, which
+        would otherwise make it permanently the freshest thing in the store, so
+        those are ignored.
         """
-        values = [record.get("last_advert") or 0, record.get("last_seen") or 0]
-        return max(float(v) for v in values)
+        horizon = time.time() + 3600
+        best = 0.0
+        for field in ("last_seen", "last_advert"):
+            value = record.get(field)
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                continue
+            if value > horizon:
+                continue
+            best = max(best, value)
+        return best
 
     def find(self, needle: str) -> Optional[tuple[str, dict]]:
         """Look a node up by key prefix or by name, case-insensitively.
@@ -226,16 +260,25 @@ class SeenNodes:
             self._save()
         return dropped
 
-    def add(self, pubkey: str, contact: Optional[dict] = None) -> bool:
-        """Record a node. Returns True if it was new."""
+    def add(
+        self, pubkey: str, contact: Optional[dict] = None, *, heard: bool = True
+    ) -> bool:
+        """Record a node. Returns True if it was new.
+
+        `heard` says whether this came from actually observing an advert. Pass
+        False when the node merely turned up in the contact list, so a dead node
+        found there isn't recorded as freshly alive.
+        """
         if not pubkey:
             return False
         if pubkey in self._nodes:
             # Known already, but a fresh advert may carry better details.
-            if contact and self._merge(self._nodes[pubkey], contact, seen_now=True):
+            if contact and self._merge(self._nodes[pubkey], contact, seen_now=heard):
                 self._save()
             return False
-        self._nodes[pubkey] = self._record(contact, first_seen=time.time())
+        self._nodes[pubkey] = self._record(
+            contact, first_seen=time.time() if heard else None, heard=heard
+        )
         self._save()
         return True
 
@@ -268,13 +311,20 @@ class SeenNodes:
         return added
 
     @staticmethod
-    def _record(contact: Optional[dict], first_seen: Optional[float]) -> dict:
+    def _record(
+        contact: Optional[dict],
+        first_seen: Optional[float],
+        *,
+        heard: bool = False,
+    ) -> dict:
         contact = contact or {}
         return {
             "name": (contact.get("adv_name") or "").strip(),
             "type": TYPE_CODES.get(contact.get("type"), ""),
             "first_seen": int(first_seen) if first_seen else None,
-            "last_seen": int(time.time()),
+            # Only set when we actually observed an advert. Being present in the
+            # node's contact list is not evidence the node is still alive.
+            "last_seen": int(time.time()) if heard else None,
             "last_advert": contact.get("last_advert") or None,
             "lat": contact.get("adv_lat") or None,
             "lon": contact.get("adv_lon") or None,

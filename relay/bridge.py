@@ -431,7 +431,11 @@ class Bridge:
                 contacts = await self._fetch_contacts()
                 for pubkey, contact in contacts.items():
                     if pubkey not in self._seen:
-                        await self._consider_node(pubkey, contact, "contact poll")
+                        # Found in the contact list, not heard directly — the
+                        # node may have stopped transmitting long ago.
+                        await self._consider_node(
+                            pubkey, contact, "contact poll", heard=False
+                        )
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - keep polling regardless
@@ -453,8 +457,16 @@ class Bridge:
             return contacts.get(pubkey)
         return None
 
-    async def _consider_node(self, pubkey: str, contact: dict, source: str) -> None:
-        """Announce a node the first time we're sure about it."""
+    async def _consider_node(
+        self, pubkey: str, contact: dict, source: str, *, heard: bool = True
+    ) -> None:
+        """Announce a node the first time we're sure about it.
+
+        `heard` distinguishes observing an advert from merely finding the node in
+        the contact list. Only the former is evidence the node is still alive, so
+        only the former timestamps it — otherwise a long-dead node found in the
+        contact list looks freshly active and can never be pruned.
+        """
         if not pubkey:
             return
 
@@ -467,10 +479,10 @@ class Bridge:
         if code not in self._cfg.notify_node_types:
             log.debug("Ignoring new %s node (filtered out): %s", code, pubkey[:6])
             # Still record it, so enabling the type later doesn't backfill alerts.
-            self._seen.add(pubkey, contact)
+            self._seen.add(pubkey, contact, heard=heard)
             return
 
-        if not self._seen.add(pubkey, contact):
+        if not self._seen.add(pubkey, contact, heard=heard):
             return  # already announced
 
         text = describe(contact)

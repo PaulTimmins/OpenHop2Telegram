@@ -467,7 +467,15 @@ re-announced by the upgrade.
 the operator keeps the same name, so the store ends up with a live entry and a
 dead one — and a lookup by name could hand the clock checker the dead key, which
 just times out. On load, the older of two same-named entries is dropped, keeping
-the most recently heard. Two entries that are *both* currently active are left
+the most recently heard.
+
+Recency is deliberately based on **advert evidence only**: `last_advert` (the
+node's own record of that contact's last advert) and `last_seen` (our timestamp
+from actually observing one). Nothing stamps a node as recently active just
+because it turned up in the contact list — a long-dead node sits in that list
+indefinitely, and treating that as a sighting would make it look permanently
+alive and never prunable. Advert times dated in the future are ignored, since a
+node with a fast clock would otherwise always rank as the freshest entry. Two entries that are *both* currently active are left
 alone (that's genuinely two nodes; deleting one would re-announce it as new next
 time it advertised), and name lookups pick the more recent of them.
 
