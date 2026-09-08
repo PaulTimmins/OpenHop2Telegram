@@ -404,6 +404,60 @@ class NodeTimeSync:
         return ""
 
     async def _login(self, contact: Any, password: str, label: str) -> None:
+        """Log in to a remote node, distinguishing refusal from silence.
+
+        The firmware answers a login with either LOGIN_SUCCESS or LOGIN_FAILED,
+        so a rejected password and an unreachable node are separable — and the
+        fix for each is completely different. meshcore's send_login_sync only
+        waits for LOGIN_SUCCESS, which collapses both into one failure.
+        """
+        commands = self._mesh.commands
+        if not hasattr(commands, "wait_for_events"):
+            await self._login_legacy(contact, password, label)
+            return
+
+        try:
+            sent = await asyncio.wait_for(
+                commands.send_login(contact, password),
+                timeout=self._cfg.reply_timeout,
+            )
+        except asyncio.TimeoutError:
+            raise TimeSyncError(
+                f"the node didn't accept the login request within "
+                f"{self._cfg.reply_timeout:.0f}s"
+            )
+
+        if sent is None or getattr(sent, "type", None) == EventType.ERROR:
+            reason = getattr(sent, "payload", None)
+            raise TimeSyncError(f"could not send the login request ({reason})")
+
+        # The node suggests how long its reply may take, scaled the way the
+        # library does it; fall back to our own timeout if it doesn't say.
+        payload = getattr(sent, "payload", None) or {}
+        suggested = payload.get("suggested_timeout")
+        timeout = self._cfg.reply_timeout
+        if suggested:
+            timeout = max(float(suggested) / 800.0, 5.0)
+
+        event = await commands.wait_for_events(
+            [EventType.LOGIN_SUCCESS, EventType.LOGIN_FAILED], timeout=timeout
+        )
+        kind = getattr(event, "type", None)
+
+        if kind == EventType.LOGIN_SUCCESS:
+            log.debug("%s: logged in", label)
+            return
+        if kind == EventType.LOGIN_FAILED:
+            raise TimeSyncError(
+                "the node rejected the password (it answered, so it is in range)"
+            )
+        raise TimeSyncError(
+            f"no login reply within {timeout:.0f}s — the node never answered, "
+            f"so it is probably out of range rather than misconfigured"
+        )
+
+    async def _login_legacy(self, contact: Any, password: str, label: str) -> None:
+        """Fallback for meshcore versions without wait_for_events."""
         try:
             result = await asyncio.wait_for(
                 self._mesh.commands.send_login_sync(contact, password),
