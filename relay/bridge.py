@@ -416,6 +416,10 @@ class Bridge:
                     )
             return
 
+        # The node has forgotten some conflicting keys; the store should too,
+        # or they linger in /nodes as permanent "(superseded)" entries.
+        self._seen.drop_missing_superseded(contacts)
+
         unknown = [(k, c) for k, c in contacts.items() if k not in self._seen]
         if unknown:
             log.info(

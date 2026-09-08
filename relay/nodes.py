@@ -95,6 +95,11 @@ class SeenNodes:
         # a first run — see load().
         self.unusable_reason: Optional[str] = None
         self._warned_write = False
+        # Which records we changed or removed since loading. Only these are
+        # written back over what's on disk, so a record we merely happen to be
+        # holding can't undo another process's change to it — see _save.
+        self._dirty: set[str] = set()
+        self._deleted: set[str] = set()
 
     def load(self) -> None:
         """Read the store from disk.
@@ -128,6 +133,26 @@ class SeenNodes:
         else:
             self._check_writable()
         self._loaded = True
+
+    def _merged_with_disk(self) -> dict[str, dict]:
+        """Our records overlaid on the current file, honouring our deletions."""
+        try:
+            raw = json.loads(self._path.read_text(encoding="utf-8"))
+            disk = self._parse(raw)
+        except (FileNotFoundError, json.JSONDecodeError, OSError, AttributeError,
+                TypeError):
+            return dict(self._nodes)
+
+        merged = dict(disk)
+        # Only our own changes go back. An untouched record we loaded earlier
+        # says nothing about the present: if another process deleted it, it
+        # should stay deleted rather than being restored from our stale copy.
+        for key in self._dirty:
+            if key in self._nodes:
+                merged[key] = self._nodes[key]
+        for key in self._deleted:
+            merged.pop(key, None)
+        return merged
 
     def _check_writable(self) -> None:
         """Confirm we can actually persist, before relying on it.
@@ -314,6 +339,7 @@ class SeenNodes:
             )
             for key in stale:
                 self._nodes[key]["superseded_by"] = keep
+                self._dirty.add(key)
                 dropped += 1
 
         if dropped:
@@ -325,8 +351,40 @@ class SeenNodes:
         if pubkey not in self._nodes:
             return False
         del self._nodes[pubkey]
+        self._dirty.discard(pubkey)
+        self._deleted.add(pubkey)
         self._save()
         return True
+
+    def drop_missing_superseded(self, present: Any) -> int:
+        """Forget superseded records whose key the node no longer carries.
+
+        Once the node has been asked to forget a conflicting key, the record
+        exists only to stop it being re-announced — and it can't be, because the
+        node can no longer offer it. Keeping it would leave the conflict visible
+        in the node list forever.
+        """
+        if not isinstance(present, (dict, set, frozenset, list, tuple)):
+            return 0
+        keys = set(present)
+        stale = [
+            key
+            for key, record in self._nodes.items()
+            if record.get("superseded_by") and key not in keys
+        ]
+        for key in stale:
+            name = self._nodes[key].get("name") or key[:12]
+            log.info(
+                "Forgetting %s (%s): superseded and no longer on the node",
+                name,
+                key[:12],
+            )
+            del self._nodes[key]
+            self._dirty.discard(key)
+            self._deleted.add(key)
+        if stale:
+            self._save()
+        return len(stale)
 
     def superseded(self) -> dict[str, dict]:
         """Records marked as replaced by a newer key of the same name."""
@@ -346,11 +404,13 @@ class SeenNodes:
         if pubkey in self._nodes:
             # Known already, but a fresh advert may carry better details.
             if contact and self._merge(self._nodes[pubkey], contact, seen_now=heard):
+                self._dirty.add(pubkey)
                 self._save()
             return False
         self._nodes[pubkey] = self._record(
             contact, first_seen=time.time() if heard else None, heard=heard
         )
+        self._dirty.add(pubkey)
         self._save()
         return True
 
@@ -372,11 +432,13 @@ class SeenNodes:
                 continue
             if key in self._nodes:
                 if contact and self._merge(self._nodes[key], contact, seen_now=False):
+                    self._dirty.add(key)
                     changed = True
                 continue
             # first_seen stays None: the node predates our tracking, so claiming
             # we first saw it now would be a lie in the data.
             self._nodes[key] = self._record(contact, first_seen=None)
+            self._dirty.add(key)
             added += 1
         if added or changed:
             self._save()
@@ -425,6 +487,12 @@ class SeenNodes:
         return changed
 
     def _save(self) -> None:
+        # The relay and the maintenance scripts both hold this file open, each
+        # with its own copy. Writing ours wholesale would undo whatever the
+        # other one changed since we loaded — which is how a removed contact
+        # came back. Merge against what's on disk instead: our records win,
+        # and anything we deliberately removed stays removed.
+        self._nodes = self._merged_with_disk()
         payload = json.dumps(
             {"version": self.VERSION, "nodes": self._nodes}, indent=1, sort_keys=True
         )
@@ -446,6 +514,9 @@ class SeenNodes:
                 except OSError:
                     pass
                 raise
+            else:
+                self._dirty.clear()
+                self._deleted.clear()
         except OSError as exc:
             if not self._warned_write:
                 self._warned_write = True
