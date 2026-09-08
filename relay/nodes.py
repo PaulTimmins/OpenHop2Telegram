@@ -82,20 +82,61 @@ class SeenNodes:
         self._path = Path(path)
         self._nodes: dict[str, dict] = {}
         self._loaded = False
+        # True when a store exists but we couldn't read or write it. That is
+        # very different from having no store yet, and must not be mistaken for
+        # a first run — see load().
+        self.unusable_reason: Optional[str] = None
+        self._warned_write = False
 
     def load(self) -> None:
-        """Read the store from disk. A missing or corrupt file starts empty."""
+        """Read the store from disk.
+
+        A missing file is a genuine first run. A file we cannot read is not:
+        treating the two alike would silently re-seed every contact on every
+        start and swallow nodes that appeared while we were down, which is
+        exactly the failure this flag exists to make visible.
+        """
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
             self._nodes = self._parse(raw)
             log.info("Loaded %d known node(s) from %s", len(self._nodes), self._path)
         except FileNotFoundError:
             log.info("No node store at %s yet; starting fresh", self._path)
-        except (json.JSONDecodeError, OSError, AttributeError, TypeError) as exc:
-            # Losing this file only costs us duplicate announcements, so a bad
-            # read should never stop the relay from starting.
-            log.warning("Could not read %s (%s); starting fresh", self._path, exc)
+        except PermissionError as exc:
+            self.unusable_reason = (
+                f"cannot read {self._path} ({exc.strerror}). It is probably owned "
+                f"by another user — running the scripts as root recreates these "
+                f"files as root-owned. New-node alerts will be unreliable until "
+                f"the daemon can read and write it."
+            )
+            log.error("%s", self.unusable_reason)
+        except (json.JSONDecodeError, AttributeError, TypeError) as exc:
+            # Corrupt content: the file is ours, it's just unreadable as JSON.
+            # Losing it only costs duplicate announcements.
+            log.warning("Could not parse %s (%s); starting fresh", self._path, exc)
+        except OSError as exc:
+            self.unusable_reason = f"cannot read {self._path} ({exc})"
+            log.error("%s", self.unusable_reason)
+        else:
+            self._check_writable()
         self._loaded = True
+
+    def _check_writable(self) -> None:
+        """Confirm we can actually persist, before relying on it.
+
+        A store that reads fine but can't be written back would look healthy
+        while quietly losing every update.
+        """
+        try:
+            probe = self._path.parent / f".{self._path.name}.wtest"
+            probe.write_text("", encoding="utf-8")
+            probe.unlink()
+        except OSError as exc:
+            self.unusable_reason = (
+                f"cannot write next to {self._path} ({exc}). Updates will be "
+                f"lost, so nodes may be announced again after a restart."
+            )
+            log.error("%s", self.unusable_reason)
 
     @classmethod
     def _parse(cls, raw: Any) -> dict[str, dict]:
@@ -375,4 +416,14 @@ class SeenNodes:
                     pass
                 raise
         except OSError as exc:
-            log.warning("Could not persist node store to %s: %s", self._path, exc)
+            if not self._warned_write:
+                self._warned_write = True
+                self.unusable_reason = f"cannot write {self._path} ({exc})"
+                log.error(
+                    "Could not persist the node store to %s (%s). Everything "
+                    "learned this session will be lost on restart.",
+                    self._path,
+                    exc,
+                )
+            else:
+                log.debug("Node store still unwritable: %s", exc)

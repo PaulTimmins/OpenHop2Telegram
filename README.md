@@ -461,6 +461,30 @@ NOTIFY_NODE_TYPES=repeater,room
 Nodes filtered out this way are still recorded as seen, so turning a type on
 later won't backfill a burst of alerts for nodes already on the mesh.
 
+### Don't run the scripts as root
+
+`sync_node_time.py` and `list_nodes.py` write `seen_nodes.json`,
+`wardrivers.json` and the metrics CSV. Running them as `root` recreates those
+files root-owned, and the daemon — running as its own service user — then can't
+read or write them. Run them as the service user instead:
+
+```bash
+sudo -u openhop python3 scripts/sync_node_time.py --port 5002
+```
+
+If it has already happened, hand the files back:
+
+```bash
+sudo chown openhop:openhop /opt/openhop-telegram-relay/{seen_nodes.json,wardrivers.json,metrics.csv}
+```
+
+The relay checks this at startup and says so rather than degrading quietly: it
+verifies it can both read *and* write the store, and posts
+`⚠️ Node store problem …` to the chat if not. An unreadable store is
+deliberately **not** treated as a first run — doing so would silently re-seed
+every contact on every restart and swallow anything that appeared while the
+daemon was down.
+
 ### Seeing what's known
 
 `seen_nodes.json` records what each node is, not just its key, so it's readable

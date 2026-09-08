@@ -45,6 +45,7 @@ class Bridge:
         self._last_wardriver_alert = 0.0
         self._seeded = False
         self._announced_offline = False
+        self._warned_store = False
 
     async def run(self) -> None:
         cfg = self._cfg
@@ -358,8 +359,32 @@ class Bridge:
             # would shadow the live one in name lookups.
             self._seen.dedupe_by_name()
 
-        first_run = self._seen.is_empty
+        broken = getattr(self._seen, "unusable_reason", None)
+        if broken and not self._warned_store:
+            self._warned_store = True
+            log.error("Node store unusable: %s", broken)
+            if self._tg is not None:
+                await self._tg.send_message(
+                    f"\u26a0\ufe0f Node store problem — new-node alerts are "
+                    f"unreliable until this is fixed:\n{broken}"
+                )
+
+        # An unreadable store is not an empty one. Calling it a first run would
+        # silently absorb every contact, including any that appeared while we
+        # were down, and would do so again on every restart.
+        first_run = self._seen.is_empty and not broken
         contacts = await self._fetch_contacts()
+
+        if broken:
+            # Record in memory so this session still behaves, but don't pretend
+            # the silence was a deliberate first-run seed.
+            added = self._seen.seed(contacts)
+            log.warning(
+                "Recorded %d contact(s) in memory only; alerts this session "
+                "will work, but the store cannot be persisted",
+                added,
+            )
+            return
 
         if first_run:
             # Pass the full records so the store keeps names and types.
