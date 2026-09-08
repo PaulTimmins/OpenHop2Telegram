@@ -343,10 +343,13 @@ class Bridge:
     # --- new node announcements -------------------------------------------
 
     async def _prime_seen_nodes(self, announce_summary: bool = True) -> None:
-        """Record the node's existing contacts so we only announce genuinely new ones.
+        """Reconcile the node's contact list with the store.
 
-        Without this, the first run would announce every contact the node
-        already knows about.
+        Silent seeding is only right once, on a genuinely empty store, where
+        announcing every contact the radio already knows would be a burst of
+        useless alerts. After that, a contact we have no record of really is
+        news — it advertised while we were down, or between reconnects — so it
+        gets announced like any other new node.
         """
         assert self._mesh is not None
         if not self._seeded:
@@ -354,21 +357,35 @@ class Bridge:
             # A reflashed node leaves a dead entry under the same name, which
             # would shadow the live one in name lookups.
             self._seen.dedupe_by_name()
-        first_run = self._seen.is_empty and announce_summary
 
+        first_run = self._seen.is_empty
         contacts = await self._fetch_contacts()
-        # Pass the full records so the store keeps names and types, not just keys.
-        added = self._seen.seed(contacts)
 
-        if first_run and added:
-            log.info("Recorded %d existing contact(s) without announcing", added)
-            if self._cfg.announce_seed_summary and self._tg is not None:
-                await self._tg.send_message(
-                    f"\U0001F5C2 Tracking {added} known node(s); "
-                    f"you'll get an alert when a new one appears."
+        if first_run:
+            # Pass the full records so the store keeps names and types.
+            added = self._seen.seed(contacts)
+            if added:
+                log.info(
+                    "First run: recorded %d existing contact(s) without announcing",
+                    added,
                 )
-        elif added:
-            log.info("Recorded %d contact(s) new to the store without announcing", added)
+                if announce_summary and self._cfg.announce_seed_summary and self._tg:
+                    await self._tg.send_message(
+                        f"\U0001F5C2 Tracking {added} known node(s); "
+                        f"you'll get an alert when a new one appears."
+                    )
+            return
+
+        unknown = [(k, c) for k, c in contacts.items() if k not in self._seen]
+        if unknown:
+            log.info(
+                "%d contact(s) new to the store since we last looked; announcing",
+                len(unknown),
+            )
+        for pubkey, contact in unknown:
+            # heard=False: it's in the contact list, but we didn't hear this
+            # advert ourselves, so don't timestamp it as a fresh sighting.
+            await self._consider_node(pubkey, contact, "contact list", heard=False)
 
     async def _fetch_contacts(self) -> dict:
         """Best-effort fetch of the node's contact list, keyed by public key."""

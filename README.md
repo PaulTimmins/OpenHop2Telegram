@@ -480,10 +480,16 @@ alone (that's genuinely two nodes; deleting one would re-announce it as new next
 time it advertised), and name lookups pick the more recent of them.
 
 Announced nodes are remembered in `SEEN_NODES_FILE` (written atomically), so a
-restart doesn't repeat them. **On the very first run the node's existing contact
-list is recorded silently** — otherwise you'd get one alert per node the radio
-already knows. You get a single `🗂 Tracking N known node(s)` summary instead;
-set `ANNOUNCE_SEED_SUMMARY=false` to suppress even that.
+restart doesn't repeat them. **On the very first run** — an empty store — the
+node's existing contact list is recorded silently, since announcing every
+contact the radio already knows would be a burst of useless alerts. You get a
+single `🗂 Tracking N known node(s)` summary instead; set
+`ANNOUNCE_SEED_SUMMARY=false` to suppress even that.
+
+That silent pass happens **only** on an empty store. On every later start or
+reconnect, a contact with no record in the store is genuinely news — it
+advertised while the relay was down, or between reconnects — and gets announced
+like any other new node.
 
 Alerts go to Telegram only — nothing is transmitted onto the mesh, so this adds
 no RF traffic.
