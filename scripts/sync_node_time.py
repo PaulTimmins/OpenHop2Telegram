@@ -106,6 +106,19 @@ def parse_args() -> argparse.Namespace:
         help="with --pause, seconds to wait for the relay to release "
         "(default: 90)",
     )
+    p.add_argument(
+        "--attempts",
+        type=int,
+        default=None,
+        help="total tries for a request that goes unanswered (default: 3, or "
+        "\"attempts\" in the config). A refusal is never retried.",
+    )
+    p.add_argument(
+        "--retry-delay",
+        type=float,
+        default=None,
+        help="seconds between retries (default: 5, or \"retry_delay\" in config)",
+    )
     p.add_argument("--log-level", default="INFO")
     return p.parse_args()
 
@@ -172,6 +185,17 @@ async def run(args: argparse.Namespace) -> int:
     host = args.host or cfg.timesync_host
     port = args.port or cfg.timesync_port
 
+    # CLI overrides the config file.
+    if args.attempts is not None:
+        sync_cfg.attempts = max(1, args.attempts)
+    if args.retry_delay is not None:
+        sync_cfg.retry_delay = args.retry_delay
+    log.info(
+        "Up to %d attempt(s) per request, %.0fs apart",
+        sync_cfg.attempts,
+        sync_cfg.retry_delay,
+    )
+
     coord = Coordinator(cfg.lock_dir)
     paused = False
     if args.pause:
@@ -224,7 +248,11 @@ async def run(args: argparse.Namespace) -> int:
         collector = (
             None
             if args.no_metrics
-            else MetricsCollector(MetricsWriter(args.metrics))
+            else MetricsCollector(
+                MetricsWriter(args.metrics),
+                attempts=sync_cfg.attempts,
+                retry_delay=sync_cfg.retry_delay,
+            )
         )
         if collector is not None:
             log.info("Logging metrics to %s", args.metrics)

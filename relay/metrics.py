@@ -30,6 +30,8 @@ from typing import Any, Optional
 
 from meshcore import EventType
 
+from .retrying import until_answered
+
 log = logging.getLogger("relay.metrics")
 
 # Stable CSV schema. Appending new names here is safe for new files, but an
@@ -176,9 +178,18 @@ class MetricsWriter:
 class MetricsCollector:
     """Queries a node for status + telemetry and records one CSV row."""
 
-    def __init__(self, writer: MetricsWriter, *, timeout: float = 30.0):
+    def __init__(
+        self,
+        writer: MetricsWriter,
+        *,
+        timeout: float = 30.0,
+        attempts: int = 3,
+        retry_delay: float = 5.0,
+    ):
         self._writer = writer
         self._timeout = timeout
+        self._attempts = attempts
+        self._retry_delay = retry_delay
 
     async def collect(
         self,
@@ -242,6 +253,19 @@ class MetricsCollector:
         if fn is None:
             log.debug("%s: %s unavailable in this meshcore version", label, method)
             return None
+        # A dropped packet is normal on LoRa, so an unanswered request is worth
+        # repeating before it becomes a gap in the graph.
+        return await until_answered(
+            lambda: self._request_once(fn, contact, label, method),
+            attempts=self._attempts,
+            delay=self._retry_delay,
+            what=method,
+            label=label,
+        )
+
+    async def _request_once(
+        self, fn: Any, contact: Any, label: str, method: str
+    ) -> Any:
         try:
             # These wait on a reply from a node that may simply never answer, so
             # they need our own deadline: an unreachable node would otherwise

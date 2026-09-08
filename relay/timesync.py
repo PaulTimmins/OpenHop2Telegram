@@ -26,6 +26,8 @@ from typing import Any, Optional
 
 from meshcore import EventType
 
+from .retrying import until_answered
+
 log = logging.getLogger("relay.timesync")
 
 # "14:23 - 12/3/2025 UTC"  ->  hour, minute, day, month, year
@@ -98,6 +100,10 @@ class SyncConfig:
     # Collect metrics from nodes discovered by the relay, not just listed ones.
     metrics_for_known_nodes: bool = False
     metrics_node_types: frozenset[str] = frozenset({"REP", "ROOM"})
+    # Requests that go unanswered are retried; a refusal never is.
+    attempts: int = 3
+    retry_delay: float = 5.0
+    reset_path_on_retry: bool = True
 
     @classmethod
     def from_dict(cls, raw: dict) -> "SyncConfig":
@@ -121,6 +127,9 @@ class SyncConfig:
             nodes=nodes,
             metrics_for_known_nodes=bool(raw.get("metrics_for_known_nodes", False)),
             metrics_node_types=node_types,
+            attempts=max(1, int(raw.get("attempts", 3))),
+            retry_delay=float(raw.get("retry_delay", 5.0)),
+            reset_path_on_retry=bool(raw.get("reset_path_on_retry", True)),
         )
 
 
@@ -416,6 +425,47 @@ class NodeTimeSync:
             await self._login_legacy(contact, password, label)
             return
 
+        answered = await until_answered(
+            lambda: self._login_once(contact, password, label),
+            attempts=self._cfg.attempts,
+            delay=self._cfg.retry_delay,
+            what="login",
+            label=label,
+            before_retry=self._reset_path_before_last(contact, label),
+        )
+        if answered:
+            return
+        raise TimeSyncError(
+            f"no login reply after {self._cfg.attempts} attempt(s) — the node "
+            f"never answered, so it is probably out of range rather than "
+            f"misconfigured"
+        )
+
+    def _reset_path_before_last(self, contact: Any, label: str):
+        """Escalate to flood routing before the final attempt.
+
+        A node that moved, or whose route changed, keeps a stored path that no
+        longer works; clearing it makes the next attempt flood instead. This is
+        what meshcore's own message retry does after a few direct tries.
+        """
+        if not self._cfg.reset_path_on_retry:
+            return None
+        reset = getattr(self._mesh.commands, "reset_path", None)
+        if reset is None:
+            return None
+        last_retry = max(1, self._cfg.attempts - 1)
+
+        async def escalate(attempt: int) -> None:
+            if attempt != last_retry:
+                return
+            log.info("%s: clearing the stored path so the next try floods", label)
+            await reset(contact)
+
+        return escalate
+
+    async def _login_once(self, contact: Any, password: str, label: str):
+        """One login attempt. None means nothing answered."""
+        commands = self._mesh.commands
         try:
             sent = await asyncio.wait_for(
                 commands.send_login(contact, password),
@@ -446,15 +496,14 @@ class NodeTimeSync:
 
         if kind == EventType.LOGIN_SUCCESS:
             log.debug("%s: logged in", label)
-            return
+            return True
         if kind == EventType.LOGIN_FAILED:
+            # Definitive: the node is in range and said no. Retrying would only
+            # spend airtime to be refused again.
             raise TimeSyncError(
                 "the node rejected the password (it answered, so it is in range)"
             )
-        raise TimeSyncError(
-            f"no login reply within {timeout:.0f}s — the node never answered, "
-            f"so it is probably out of range rather than misconfigured"
-        )
+        return None  # silence — worth another attempt
 
     async def _login_legacy(self, contact: Any, password: str, label: str) -> None:
         """Fallback for meshcore versions without wait_for_events."""
@@ -476,6 +525,21 @@ class NodeTimeSync:
 
     async def _command(self, contact: Any, cmd: str, label: str) -> str:
         """Send an admin CLI command and return the node's text reply."""
+        reply = await until_answered(
+            lambda: self._command_once(contact, cmd, label),
+            attempts=self._cfg.attempts,
+            delay=self._cfg.retry_delay,
+            what=f"{cmd!r}",
+            label=label,
+        )
+        if reply is None:
+            raise TimeSyncError(
+                f"no reply to {cmd!r} after {self._cfg.attempts} attempt(s)"
+            )
+        return reply
+
+    async def _command_once(self, contact: Any, cmd: str, label: str):
+        """One command attempt. None means nothing answered."""
         pubkey = self._pubkey_of(contact)
         filters = {"pubkey_prefix": pubkey[:12]} if pubkey else None
 
@@ -489,9 +553,7 @@ class NodeTimeSync:
             timeout=self._cfg.reply_timeout,
         )
         if event is None:
-            raise TimeSyncError(
-                f"no reply to {cmd!r} within {self._cfg.reply_timeout:.0f}s"
-            )
+            return None
         return (event.payload or {}).get("text", "")
 
     @staticmethod

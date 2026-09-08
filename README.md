@@ -214,6 +214,31 @@ Output looks like:
 ⚠️ Ridge Repeater (+900s) — running 900s ahead; firmware refuses to set a clock backwards, so this needs a power cycle at the node
 ```
 
+### Retries
+
+A lost packet is ordinary on LoRa, so every request that goes **unanswered** is
+retried — login, `clock`, `time`, status and telemetry:
+
+```json
+{ "attempts": 3, "retry_delay": 5, "reset_path_on_retry": true }
+```
+
+or per-run with `--attempts` / `--retry-delay`.
+
+**A refusal is never retried.** A wrong password (`LOGIN_FAILED`) or
+`(ERR: clock cannot go backwards)` is a definitive answer that won't change, and
+asking again would only spend airtime to hear it twice.
+
+Before the **final** login attempt, the node's stored route is cleared so that
+try floods instead. A node that moved, or whose path went stale, is
+indistinguishable from one out of range until you stop relying on the old route
+— this is the same escalation `meshcore` uses for its own message retries. Set
+`reset_path_on_retry: false` to skip it.
+
+> Airtime: attempts multiply across requests. Three attempts over four requests
+> is up to twelve transmissions per node on a shared channel, so raise it for a
+> genuinely marginal link rather than by default.
+
 ### Two firmware limits worth knowing
 
 **A clock that's ahead cannot be fixed remotely.** The firmware accepts

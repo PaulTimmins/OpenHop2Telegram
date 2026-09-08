@@ -16,6 +16,21 @@
   ],
   "tolerance_seconds": 120,
   "reply_timeout": 45,
+  "_retries": [
+    "A lost packet is normal on LoRa, so an unanswered request is retried.",
+    "attempts: total tries per request (login, clock, status, telemetry).",
+    "retry_delay: seconds between them. Each retry costs airtime, so keep",
+    "  both modest -- 3 attempts across 4 requests is already 12 transmissions",
+    "  per node in the worst case.",
+    "reset_path_on_retry: before the final login attempt, clear the node's",
+    "  stored route so that try floods instead. Helps when a node moved or its",
+    "  path went stale, which looks identical to being out of range.",
+    "A node that answers with a refusal (wrong password, clock cannot go",
+    "backwards) is never retried -- that answer will not change."
+  ],
+  "attempts": 3,
+  "retry_delay": 5,
+  "reset_path_on_retry": true,
   "_discovery": [
     "metrics_for_known_nodes: also sample every node the relay has discovered",
     "  (from seen_nodes.json), without listing it here. Telemetry needs no",
