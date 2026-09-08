@@ -233,6 +233,7 @@ async def run(args: argparse.Namespace) -> int:
         # it has already discovered, and can drive metrics-only sampling.
         store = SeenNodes(args.store or cfg.seen_nodes_file)
         store.load()
+        store.dedupe_by_name()
 
         results = await NodeTimeSync(
             mesh,

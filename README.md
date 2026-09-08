@@ -463,6 +463,14 @@ Older stores were a bare list of keys; those are migrated automatically on first
 load, with names filling in as each node advertises again. Nothing is
 re-announced by the upgrade.
 
+**Duplicate names are pruned.** Reflashing a node gives it a new keypair while
+the operator keeps the same name, so the store ends up with a live entry and a
+dead one — and a lookup by name could hand the clock checker the dead key, which
+just times out. On load, the older of two same-named entries is dropped, keeping
+the most recently heard. Two entries that are *both* currently active are left
+alone (that's genuinely two nodes; deleting one would re-announce it as new next
+time it advertised), and name lookups pick the more recent of them.
+
 Announced nodes are remembered in `SEEN_NODES_FILE` (written atomically), so a
 restart doesn't repeat them. **On the very first run the node's existing contact
 list is recorded silently** — otherwise you'd get one alert per node the radio

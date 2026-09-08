@@ -128,18 +128,103 @@ class SeenNodes:
     def get(self, pubkey: str) -> Optional[dict]:
         return self._nodes.get(pubkey)
 
+    @staticmethod
+    def recency(record: dict) -> float:
+        """How recently this node was heard from.
+
+        Takes the latest of the two timestamps: `last_advert` comes from the
+        node itself and can be wildly wrong if its clock is off, while
+        `last_seen` is ours.
+        """
+        values = [record.get("last_advert") or 0, record.get("last_seen") or 0]
+        return max(float(v) for v in values)
+
     def find(self, needle: str) -> Optional[tuple[str, dict]]:
-        """Look a node up by key prefix or by name, case-insensitively."""
+        """Look a node up by key prefix or by name, case-insensitively.
+
+        Names are not unique: reflashing a node gives it a new keypair while the
+        operator keeps the same name, leaving a live entry and a dead one. When
+        several match, the most recently heard wins — the stale key would just
+        time out.
+        """
         needle = (needle or "").strip().lower()
         if not needle:
             return None
+
+        matches = [
+            (key, record)
+            for key, record in self._nodes.items()
+            if key.lower().startswith(needle)
+        ]
+        if not matches:
+            matches = [
+                (key, record)
+                for key, record in self._nodes.items()
+                if (record.get("name") or "").strip().lower() == needle
+            ]
+        if not matches:
+            return None
+
+        if len(matches) > 1:
+            matches.sort(key=lambda kv: self.recency(kv[1]), reverse=True)
+            log.info(
+                "%r matches %d nodes; using the most recent (%s)",
+                needle,
+                len(matches),
+                matches[0][0][:12],
+            )
+        return matches[0]
+
+    def dedupe_by_name(self, min_gap: float = 86400.0) -> int:
+        """Drop older duplicates of a name, keeping the most recently heard.
+
+        A name collision almost always means the node was reflashed: the old key
+        is dead and will never advertise again, but it still shadows the live one
+        in name lookups.
+
+        Only duplicates at least `min_gap` seconds behind the survivor are
+        dropped. Two nodes that are both currently active but happen to share a
+        name are genuinely two nodes; deleting one would re-announce it as new
+        the next time it advertised, and then delete it again. Those are left
+        alone, and `find` picking the most recent handles the ambiguity.
+        """
+        by_name: dict[str, list[str]] = {}
         for key, record in self._nodes.items():
-            if key.lower().startswith(needle):
-                return key, record
-        for key, record in self._nodes.items():
-            if (record.get("name") or "").strip().lower() == needle:
-                return key, record
-        return None
+            name = (record.get("name") or "").strip().lower()
+            if name:
+                by_name.setdefault(name, []).append(key)
+
+        dropped = 0
+        for name, keys in by_name.items():
+            if len(keys) < 2:
+                continue
+            keys.sort(key=lambda k: self.recency(self._nodes[k]), reverse=True)
+            keep = keys[0]
+            newest = self.recency(self._nodes[keep])
+            stale = [
+                k for k in keys[1:] if newest - self.recency(self._nodes[k]) >= min_gap
+            ]
+            if not stale:
+                log.debug(
+                    "%r maps to %d nodes, all recently active; keeping both",
+                    name,
+                    len(keys),
+                )
+                continue
+            log.info(
+                "Keeping %s for %r and dropping %d stale duplicate(s): %s",
+                keep[:12],
+                name,
+                len(stale),
+                ", ".join(k[:12] for k in stale),
+            )
+            for key in stale:
+                del self._nodes[key]
+                dropped += 1
+
+        if dropped:
+            self._save()
+        return dropped
 
     def add(self, pubkey: str, contact: Optional[dict] = None) -> bool:
         """Record a node. Returns True if it was new."""

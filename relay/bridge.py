@@ -351,6 +351,9 @@ class Bridge:
         assert self._mesh is not None
         if not self._seeded:
             self._seen.load()
+            # A reflashed node leaves a dead entry under the same name, which
+            # would shadow the live one in name lookups.
+            self._seen.dedupe_by_name()
         first_run = self._seen.is_empty and announce_summary
 
         contacts = await self._fetch_contacts()
