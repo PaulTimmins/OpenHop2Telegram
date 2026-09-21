@@ -10,6 +10,48 @@ import httpx
 
 log = logging.getLogger("relay.telegram")
 
+# Telegram rejects text over 4096 characters and captions over 1024. Both are
+# counted in UTF-16 code units, so an emoji costs two; the margin keeps a
+# message full of them from tipping over a limit that looks satisfied here.
+MAX_TEXT = 3900
+MAX_CAPTION = 1000
+
+
+def split_message(text: str, limit: int = MAX_TEXT) -> list[str]:
+    """Break text into sendable parts, preferring line boundaries.
+
+    Long output is split rather than cut off: a node list or a trace is only
+    useful whole. Paragraph and line breaks are used where they fall, and a
+    single line longer than the limit is hard-split rather than dropped.
+    """
+    text = text or ""
+    if len(text) <= limit:
+        return [text] if text else []
+
+    parts: list[str] = []
+    current = ""
+
+    for line in text.split("\n"):
+        # A single line too long to ever fit has to be broken mid-line.
+        while len(line) > limit:
+            if current:
+                parts.append(current)
+                current = ""
+            parts.append(line[:limit])
+            line = line[limit:]
+
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) <= limit:
+            current = candidate
+        else:
+            if current:
+                parts.append(current)
+            current = line
+
+    if current:
+        parts.append(current)
+    return parts
+
 
 class TelegramClient:
     """Just enough of the Bot API: send a message, and long-poll for updates."""
@@ -30,28 +72,41 @@ class TelegramClient:
         return await self._call("getMe")
 
     async def send_message(self, text: str) -> None:
-        if not text:
-            return
-        try:
-            await self._call(
-                "sendMessage",
-                json={
-                    "chat_id": self._chat_id,
-                    "text": text,
-                    "disable_web_page_preview": True,
-                },
-            )
-        except Exception as exc:  # noqa: BLE001 - never let one send kill the relay
-            log.warning("Failed to send message to Telegram: %s", exc)
+        """Send text, splitting it across messages if it exceeds the limit."""
+        parts = split_message(text)
+        if len(parts) > 1:
+            log.debug("Splitting a %d character message into %d parts",
+                      len(text), len(parts))
+        for part in parts:
+            try:
+                await self._call(
+                    "sendMessage",
+                    json={
+                        "chat_id": self._chat_id,
+                        "text": part,
+                        "disable_web_page_preview": True,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001 - one failure must not lose the rest
+                log.warning("Failed to send message to Telegram: %s", exc)
 
     async def send_photo(
         self, image: bytes, *, caption: str = "", filename: str = "chart.png"
     ) -> None:
-        """Upload an image. Falls back to the caption alone if it's rejected."""
+        """Upload an image, following it with any caption too long to attach.
+
+        Captions have a much smaller limit than messages, so rather than cut
+        one short the overflow is sent as ordinary messages after the photo.
+        """
+        attached, overflow = caption, ""
+        if len(caption) > MAX_CAPTION:
+            parts = split_message(caption, MAX_CAPTION)
+            attached, overflow = parts[0], "\n".join(parts[1:])
+
         try:
             resp = await self._client.post(
                 f"{self._base}/sendPhoto",
-                data={"chat_id": self._chat_id, "caption": caption[:1024]},
+                data={"chat_id": self._chat_id, "caption": attached},
                 files={"photo": (filename, image, "image/png")},
             )
             resp.raise_for_status()
@@ -61,6 +116,10 @@ class TelegramClient:
         except Exception as exc:  # noqa: BLE001
             log.warning("Photo upload failed (%s); sending text instead", exc)
             await self.send_message(caption)
+            return
+
+        if overflow:
+            await self.send_message(overflow)
 
     async def poll_messages(self) -> AsyncIterator[dict]:
         """Yield incoming message objects for the configured chat, forever.

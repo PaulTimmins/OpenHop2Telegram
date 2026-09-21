@@ -188,6 +188,15 @@ the mesh to discover one and tells you what it found, so a second
 there and then. They resolve a name or key prefix and never pick a key marked
 superseded.
 
+A reply too long for one Telegram message is **split across several**, at line
+boundaries, rather than cut short — a node list or a trace is only useful whole.
+The same applies to a `/battery` caption: captions have a much smaller limit than
+messages, so the overflow follows the photo as ordinary messages.
+
+(The `MESH_MAX_CHARS` truncation on Telegram → mesh is unrelated and stays: a
+LoRa payload is a hard radio limit, and splitting one chat line into several
+transmissions would flood a shared channel.)
+
 Commands are handled instead of being relayed, so they never reach the mesh. An
 **unrecognised** command is left alone entirely, in case another bot in the group
 owns it. Anyone who can post in the chat can run these; set

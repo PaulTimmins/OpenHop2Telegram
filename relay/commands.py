@@ -29,9 +29,6 @@ except Exception:  # pragma: no cover
     EVENT_ERROR = EVENT_LOGIN_SUCCESS = EVENT_LOGIN_FAILED = object()
     EVENT_TRACE_DATA = EVENT_PATH_RESPONSE = object()
 
-# Telegram rejects messages over 4096 characters.
-_MAX_MESSAGE = 3800
-
 _SPARK = "▁▂▃▄▅▆▇█"
 
 HELP = """Available commands:
@@ -125,12 +122,6 @@ def ago(epoch: Optional[float]) -> str:
     return f"{delta}s"
 
 
-def _clip(text: str) -> str:
-    if len(text) <= _MAX_MESSAGE:
-        return text
-    return text[:_MAX_MESSAGE].rsplit("\n", 1)[0] + "\n… (truncated)"
-
-
 def read_battery_series(
     path: str | Path, *, node: str = "", days: float = 7.0
 ) -> dict[str, list[tuple[float, float]]]:
@@ -219,7 +210,7 @@ def summarise_battery(series: dict[str, list[tuple[float, float]]], days: float)
             f"  now {last:.0f}mV  {arrow} {change:+.0f}mV over {len(values)} sample(s)\n"
             f"  min {min(values):.0f}  max {max(values):.0f}"
         )
-    return _clip("\n".join(lines))
+    return "\n".join(lines)
 
 
 class CommandRouter:
@@ -278,7 +269,8 @@ class CommandRouter:
 
     async def _say(self, text: str) -> None:
         if self._tg is not None:
-            await self._tg.send_message(_clip(text))
+            # The client splits anything over the limit, so nothing is cut.
+            await self._tg.send_message(text)
 
     # --- /help ------------------------------------------------------------
 
@@ -332,7 +324,7 @@ class CommandRouter:
 
         png = render_png(series, days) if series else None
         if png and hasattr(self._tg, "send_photo"):
-            await self._tg.send_photo(png, caption=_clip(text), filename="battery.png")
+            await self._tg.send_photo(png, caption=text, filename="battery.png")
             return
         if series and png is None:
             text += "\n\n(install matplotlib for a plotted chart)"
