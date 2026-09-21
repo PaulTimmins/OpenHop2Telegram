@@ -489,6 +489,13 @@ class CommandRouter:
                     f"  probes sent this session: {status.get('sent')}   "
                     f"heard: {status.get('heard')}"
                 )
+                other = status.get("heard_other") or 0
+                echo = status.get("own_echo") or 0
+                if other or echo:
+                    lines.append(
+                        f"  other traffic on that channel: {other}   "
+                        f"own beacons echoed back: {echo}"
+                    )
                 if not status.get("enabled"):
                     lines.append("\nSet PROPTEST_ENABLED=true to turn it on.")
                 elif status.get("channel_idx") is None:
@@ -496,12 +503,18 @@ class CommandRouter:
                         "\nThe channel isn't resolved, so nothing can be sent "
                         "or heard on it."
                     )
+                elif status.get("heard_other") or status.get("own_echo"):
+                    lines.append(
+                        "\nWe are receiving on that channel — traffic has "
+                        "arrived, just nothing that parsed as a peer probe. So "
+                        "the link works and the senders are the question."
+                    )
                 elif status.get("sent") and not status.get("heard"):
                     lines.append(
-                        "\nWe're transmitting but hearing nothing. Either no "
-                        "other relay is beaconing, or this radio isn't "
-                        "receiving theirs — compare with /proptest on another "
-                        "relay."
+                        "\nWe're transmitting but nothing has arrived on that "
+                        "channel at all. Either no other relay is beaconing, "
+                        "or this radio isn't receiving them — compare with "
+                        "/proptest on another relay."
                     )
             await self._say("\n".join(lines))
             return

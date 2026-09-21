@@ -74,6 +74,11 @@ class Bridge:
         self._probes_sent = 0
         self._probes_heard = 0
         self._logged_unknown_idx: set = set()
+        # Anything on the probe channel that wasn't a peer probe, split
+        # so /proptest can distinguish 'heard nothing' from 'heard
+        # traffic but not probes'.
+        self._probes_heard_other = 0
+        self._own_probes_seen = 0
         self._probe_task: Optional[asyncio.Task] = None
         self._wardrivers = WardriverLog(config.wardriving_log_file)
         self._wardriving_re = (
@@ -833,6 +838,8 @@ class Bridge:
             "interval": self._cfg.proptest_interval,
             "sent": self._probes_sent,
             "heard": self._probes_heard,
+            "heard_other": self._probes_heard_other,
+            "own_echo": self._own_probes_seen,
             "beaconing": self._probe_task is not None
             and not self._probe_task.done(),
         }
@@ -894,10 +901,21 @@ class Bridge:
     def _on_probe(self, payload: dict, text: str) -> None:
         probe = parse_probe(text)
         if probe is None:
-            log.debug("Unreadable probe on the test channel: %r", text)
+            # Logged at INFO deliberately: this channel normally carries only
+            # machine-generated probes, so anything else on it is both rare and
+            # the obvious thing to send when checking whether reception works.
+            log.info(
+                "Non-probe message on %r (index %s), ignoring: %r",
+                self._cfg.proptest_channel,
+                self._proptest_idx,
+                text[:80],
+            )
+            self._probes_heard_other += 1
             return
         if probe.origin.strip().lower() == self._cfg.proptest_id.strip().lower():
-            return  # our own beacon looping back
+            log.debug("Skipping our own beacon (seq %s)", probe.seq)
+            self._own_probes_seen += 1
+            return
 
         self._probes.record(
             probe,
