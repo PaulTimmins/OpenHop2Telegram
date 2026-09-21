@@ -96,6 +96,7 @@ class Config:
     wardriving_log_file: str
     wardriving_pattern: str
     wardriving_min_alert_gap: float
+    wardriving_create_channel: bool
     reconnect_min_delay: float
     reconnect_max_delay: float
     healthcheck_interval: float
@@ -109,6 +110,7 @@ class Config:
     proptest_interval: float
     proptest_id: str
     proptest_log: str
+    proptest_create_channel: bool
     relay_name: str
     # Endpoint the maintenance scripts use. Defaults to the relay's, but can
     # point somewhere else (a second companion port, a proxy, another node) so
@@ -172,6 +174,11 @@ class Config:
             wardriving_min_alert_gap=float(
                 os.getenv("WARDRIVING_MIN_ALERT_GAP", "0")
             ),
+            # Off by default: wardriving is on by default, and silently adding
+            # a channel to someone's radio on upgrade would be a surprise.
+            wardriving_create_channel=_parse_bool(
+                os.getenv("WARDRIVING_CREATE_CHANNEL", ""), False
+            ),
             reconnect_min_delay=float(os.getenv("RECONNECT_MIN_DELAY", "5")),
             reconnect_max_delay=float(os.getenv("RECONNECT_MAX_DELAY", "300")),
             healthcheck_interval=float(os.getenv("HEALTHCHECK_INTERVAL", "45")),
@@ -193,6 +200,11 @@ class Config:
                 os.getenv("PROPTEST_ID", "").strip() or _default_probe_id()
             ),
             proptest_log=os.getenv("PROPTEST_LOG", "proptest.csv").strip(),
+            # Propagation testing is opt-in already, so creating the
+            # channel it needs follows from enabling it.
+            proptest_create_channel=_parse_bool(
+                os.getenv("PROPTEST_CREATE_CHANNEL", ""), True
+            ),
             relay_name=(
                 os.getenv("RELAY_NAME", "").strip() or _default_probe_id()
             ),

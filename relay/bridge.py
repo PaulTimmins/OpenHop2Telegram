@@ -763,11 +763,13 @@ class Bridge:
     async def _setup_proptest(self) -> None:
         """Find the probe channel and start beaconing on it."""
         cfg = self._cfg
-        self._proptest_idx = await self._find_channel(cfg.proptest_channel)
+        self._proptest_idx = await self._ensure_channel(
+            cfg.proptest_channel, create=cfg.proptest_create_channel
+        )
         if self._proptest_idx is None:
             log.info(
-                "No %r channel on this node; propagation testing is off. Add the "
-                "channel (same name and key on every relay) to enable it.",
+                "No %r channel on this node and it couldn't be created; "
+                "propagation testing is off.",
                 cfg.proptest_channel,
             )
             return
@@ -836,7 +838,9 @@ class Bridge:
             self._wardrivers.prune(max(cfg.wardriving_quiet_seconds * 24, 86400))
             self._wardrivers_loaded = True
 
-        self._wardriving_idx = await self._find_channel(cfg.wardriving_channel)
+        self._wardriving_idx = await self._ensure_channel(
+            cfg.wardriving_channel, create=cfg.wardriving_create_channel
+        )
         if self._wardriving_idx is None:
             log.info(
                 "No %r channel on this node; wardriver alerts are off. Add the "
@@ -910,6 +914,86 @@ class Bridge:
             await self._tg.send_message(alert)
 
     # --- channel resolution ----------------------------------------------
+
+    async def _ensure_channel(self, name: str, *, create: bool) -> Optional[int]:
+        """Find a channel by name, creating it in a free slot if allowed.
+
+        Hashtag channels have a key derived from their name -- SHA256 of the
+        name including the '#', first 16 bytes -- so every relay that creates
+        '#tgmeshtest' independently arrives at the same key and they can hear
+        each other without anyone exchanging secrets. That only holds for the
+        '#'-prefixed spelling, so that is what gets written even when the
+        config omits it.
+        """
+        assert self._mesh is not None
+        found = await self._find_channel(name)
+        if found is not None or not create:
+            return found
+
+        canonical = name.strip()
+        if not canonical:
+            return None
+        if not canonical.startswith("#"):
+            canonical = f"#{canonical}"
+        if len(canonical.encode("utf-8")) > 32:
+            log.warning("Channel name %r is too long to create", canonical)
+            return None
+
+        slot = await self._free_channel_slot()
+        if slot is None:
+            log.warning(
+                "No free channel slot to create %r; free one on the node or "
+                "add the channel by hand",
+                canonical,
+            )
+            return None
+
+        setter = getattr(self._mesh.commands, "set_channel", None)
+        if setter is None:
+            log.warning("This meshcore version can't create channels")
+            return None
+
+        try:
+            # No secret passed: the library derives the hashtag key from the
+            # name, which is the whole point of using one.
+            result = await setter(slot, canonical)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Could not create %r: %s", canonical, exc)
+            return None
+        if getattr(result, "type", None) == EventType.ERROR:
+            log.warning("Node refused to create %r: %s", canonical, result.payload)
+            return None
+
+        # Confirm it actually took rather than trusting the OK.
+        confirmed = await self._find_channel(canonical)
+        if confirmed is None:
+            log.warning("Created %r but the node doesn't report it", canonical)
+            return None
+
+        log.info("Created channel %r in slot %d", canonical, confirmed)
+        if self._tg is not None:
+            await self._tg.send_message(
+                f"\U0001F195 Created channel “{canonical}” on "
+                f"{self._cfg.relay_name} (slot {confirmed}). Its key comes from "
+                f"the name, so other relays doing the same will match."
+            )
+        return confirmed
+
+    async def _free_channel_slot(self) -> Optional[int]:
+        """The first channel slot with no name, so nothing is overwritten."""
+        assert self._mesh is not None
+        for idx in range(_MAX_CHANNEL_SCAN):
+            try:
+                result = await self._mesh.commands.get_channel(idx)
+            except Exception:  # noqa: BLE001
+                break
+            if getattr(result, "type", None) == EventType.ERROR:
+                # The node doesn't have this slot at all; stop probing.
+                break
+            payload = result.payload or {}
+            if not (payload.get("channel_name") or payload.get("name") or "").strip():
+                return idx
+        return None
 
     async def _find_channel(self, name: str) -> Optional[int]:
         """Index of the channel with this name, or None if the node has no such channel."""

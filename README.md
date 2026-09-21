@@ -257,13 +257,28 @@ FarRelay
   last 21m ago  SNR -4.5
 ```
 
-Set it up on **every** relay, each with the same channel name *and key*:
+Set it up on **every** relay:
 
 ```bash
 PROPTEST_ENABLED=true
 PROPTEST_CHANNEL=tgmeshtest
 PROPTEST_INTERVAL=300
 ```
+
+The channel is **created automatically** if the node doesn't have it, in the
+first free slot. A hashtag channel's key is derived from its name — SHA-256 of
+`#tgmeshtest`, first 16 bytes — so every relay that creates it independently
+arrives at the same key and no secret has to be copied between them. It's
+written as `#tgmeshtest` even if you configure it without the hash, since only
+the `#` spelling produces the interoperable key.
+
+An existing channel is never overwritten, and with no free slot it says so and
+stays off rather than clobbering one. Set `PROPTEST_CREATE_CHANNEL=false` to
+require you to add it by hand.
+
+`WARDRIVING_CREATE_CHANNEL` does the same for `#wardriving`, but defaults to
+**false** — wardriving is on by default, and adding a channel to your radio on
+upgrade shouldn't happen silently.
 
 It's **off by default** because, unlike everything else here, it transmits on a
 schedule. With no such channel on the node it logs one line and stays off.
