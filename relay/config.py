@@ -112,6 +112,7 @@ class Config:
     proptest_log: str
     proptest_create_channel: bool
     relay_name: str
+    send_location_pins: bool
     # Endpoint the maintenance scripts use. Defaults to the relay's, but can
     # point somewhere else (a second companion port, a proxy, another node) so
     # the scripts don't share the relay's message queue.
@@ -207,6 +208,9 @@ class Config:
             ),
             relay_name=(
                 os.getenv("RELAY_NAME", "").strip() or _default_probe_id()
+            ),
+            send_location_pins=_parse_bool(
+                os.getenv("SEND_LOCATION_PINS", ""), True
             ),
             timesync_host=(
                 os.getenv("TIMESYNC_HOST", "").strip()

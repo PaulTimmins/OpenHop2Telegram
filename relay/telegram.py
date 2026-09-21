@@ -90,6 +90,25 @@ class TelegramClient:
             except Exception as exc:  # noqa: BLE001 - one failure must not lose the rest
                 log.warning("Failed to send message to Telegram: %s", exc)
 
+    async def send_location(self, latitude: float, longitude: float) -> None:
+        """Drop a map pin. Telegram renders this as an interactive map."""
+        try:
+            lat, lon = float(latitude), float(longitude)
+        except (TypeError, ValueError):
+            return
+        # Out-of-range values would be rejected by the API; skip quietly rather
+        # than turning a nice-to-have pin into a visible error.
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+            log.debug("Refusing to pin an out-of-range position: %s, %s", lat, lon)
+            return
+        try:
+            await self._call(
+                "sendLocation",
+                json={"chat_id": self._chat_id, "latitude": lat, "longitude": lon},
+            )
+        except Exception as exc:  # noqa: BLE001 - a missing pin must not lose the alert
+            log.warning("Failed to send location pin: %s", exc)
+
     async def send_photo(
         self, image: bytes, *, caption: str = "", filename: str = "chart.png"
     ) -> None:

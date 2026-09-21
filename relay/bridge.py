@@ -690,6 +690,11 @@ class Bridge:
         log.info("new node via %s -> tg: %s", source, text.replace("\n", " | "))
         if self._tg is not None:
             await self._tg.send_message(text)
+            lat = contact.get("adv_lat") or 0
+            lon = contact.get("adv_lon") or 0
+            # 0,0 is what a node with location sharing off advertises.
+            if (lat or lon) and self._cfg.send_location_pins:
+                await self._tg.send_location(lat, lon)
 
     # --- telegram -> mesh -------------------------------------------------
 
@@ -1018,6 +1023,10 @@ class Bridge:
         )
         if self._tg is not None:
             await self._tg.send_message(alert)
+            # A pin is far more use than two decimal numbers when the point is
+            # where somebody was.
+            if sighting.has_position and self._cfg.send_location_pins:
+                await self._tg.send_location(sighting.lat, sighting.lon)
 
     # --- channel resolution ----------------------------------------------
 

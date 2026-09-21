@@ -53,7 +53,9 @@ All configuration is via environment variables (or a `.env` file). See
 | `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather | — |
 | `TELEGRAM_CHAT_ID` | Target chat/group/channel id | — |
 | `RELAY_DIRECTION` | `both`, `mesh_to_tg`, or `tg_to_mesh` | `both` |
-| `MESH_MAX_CHARS` | Truncate outgoing mesh messages (LoRa is small) | `140` |
+| `MESH_MAX_CHARS` | Characters per mesh transmission; longer messages split | `140` |
+| `MESH_MAX_PARTS` / `MESH_PART_DELAY` | Cap on parts per message, and spacing | `4` / `3` |
+| `RELAY_NAME` | This relay's name in its own status messages | hostname |
 | `NOTIFY_NEW_NODES` | Alert when a node is seen for the first time | `true` |
 | `NOTIFY_NODE_TYPES` | Which node types to alert on | `all` |
 | `SEEN_NODES_FILE` | Where already-announced nodes are remembered | `seen_nodes.json` |
@@ -61,10 +63,15 @@ All configuration is via environment variables (or a `.env` file). See
 | `WARDRIVING_ENABLED` | Watch a channel for wardrivers | `true` |
 | `WARDRIVING_CHANNEL` | Channel to watch | `wardriving` |
 | `WARDRIVING_QUIET_SECONDS` | Only alert after this much silence from them | `3600` |
+| `SEND_LOCATION_PINS` | Follow located alerts with a Telegram map pin | `true` |
 | `TIMESYNC_HOST` / `TIMESYNC_PORT` | Endpoint the maintenance scripts use | falls back to `OPENHOP_*` |
 | `RECONNECT_MIN_DELAY` / `RECONNECT_MAX_DELAY` | Reconnect backoff bounds (seconds) | `5` / `300` |
 | `HEALTHCHECK_INTERVAL` | Liveness probe + keepalive interval; `0` disables | `45` |
 | `NOTIFY_CONNECTION_EVENTS` | Tell the chat when the link drops/returns | `true` |
+| `PROPTEST_ENABLED` | Beacon probes and measure link reliability | `false` |
+| `PROPTEST_CHANNEL` / `PROPTEST_INTERVAL` | Probe channel, and seconds between probes | `tgmeshtest` / `300` |
+| `PROPTEST_ID` / `PROPTEST_LOG` | Name in probes, and where receipts are logged | hostname / `proptest.csv` |
+| `COMMANDS_ENABLED` / `METRICS_CSV` | Chat commands, and the log `/battery` reads | `true` / `metrics.csv` |
 
 ### Getting the chat ID
 
@@ -278,8 +285,57 @@ session, the watcher runs, and the relay reconnects on its own afterwards.
 
 ## Propagation testing
 
-Each relay can beacon a tiny probe on a dedicated channel, and every relay logs
-the probes it hears. `/proptest` then reports delivery over time:
+Measures **how reliably your relays hear each other**, continuously, so you can
+tell a marginal link from a dead one and see the effect of moving an antenna.
+
+Each relay beacons a small probe on a dedicated channel on its own schedule, and
+every relay logs the probes it hears. `/proptest` turns that log into delivery
+rates.
+
+### What the number actually means
+
+It is **one direction of one link**: the share of a peer's transmissions that
+reached *this* relay. A peer at 40% is not necessarily transmitting badly — this
+relay may simply be hearing it badly, and those need different fixes.
+
+To tell them apart, run `/proptest` on more than one relay:
+
+| Symptom | Reading |
+| --- | --- |
+| A is poor on every other relay | A's transmit, or its siting |
+| Everyone is poor on relay B only | B's receive, or its siting |
+| A↔B poor, both fine elsewhere | that particular path |
+
+### Setting it up
+
+**Off by default**, because unlike everything else here it transmits on a
+schedule. On each relay:
+
+```bash
+PROPTEST_ENABLED=true
+PROPTEST_CHANNEL=tgmeshtest
+PROPTEST_INTERVAL=300
+PROPTEST_ID=            # blank = hostname; set it if hostnames are unhelpful
+```
+
+Then restart. Probes begin shortly after connect, and figures become meaningful
+once each peer has a few hours logged — a single sighting reads as 1/1, i.e.
+100%.
+
+### The channel
+
+Created automatically in the first free slot if the node doesn't have it. A
+hashtag channel's key is **derived from its name** — `SHA-256("#tgmeshtest")`,
+first 16 bytes — so every relay that creates it independently arrives at the
+same key and **no secret is ever copied between them**. That is the whole reason
+for using a hashtag channel here.
+
+It is written `#tgmeshtest` even if you configure `tgmeshtest`, because only the
+`#` spelling yields the interoperable key; matching accepts either spelling.
+An existing channel is never overwritten, and with every slot full it reports
+that and stays off. `PROPTEST_CREATE_CHANNEL=false` to add it by hand instead.
+
+### Reading the output
 
 ```
 📶 Probe delivery, last 24h
@@ -293,52 +349,95 @@ FarRelay
   last 21m ago  SNR -4.5
 ```
 
-Set it up on **every** relay:
+`(4/12)` is heard over expected. Expected comes from the span covered and **the
+sender's own interval, carried in each probe** — not from sequence numbers,
+because a relay that reboots restarts its counter and the gap would read as
+loss. `/proptest 6` narrows the window to 6 hours.
 
-```bash
-PROPTEST_ENABLED=true
-PROPTEST_CHANNEL=tgmeshtest
-PROPTEST_INTERVAL=300
+With nothing logged yet it reports live state instead, which says which half is
+failing:
+
+```
+No probes heard in the last 24h.
+
+This relay: id 'klefki', channel 'tgmeshtest' (index 2)
+  enabled: True   beaconing: True
+  probes sent this session: 3   heard: 0
+  other traffic on that channel: 1   own beacons echoed back: 0
 ```
 
-The channel is **created automatically** if the node doesn't have it, in the
-first free slot. A hashtag channel's key is derived from its name — SHA-256 of
-`#tgmeshtest`, first 16 bytes — so every relay that creates it independently
-arrives at the same key and no secret has to be copied between them. It's
-written as `#tgmeshtest` even if you configure it without the hash, since only
-the `#` spelling produces the interoperable key.
+### The probe format
 
-An existing channel is never overwritten, and with no free slot it says so and
-stays off rather than clobbering one. Set `PROPTEST_CREATE_CHANNEL=false` to
-require you to add it by hand.
+Sent as:
 
-`WARDRIVING_CREATE_CHANNEL` does the same for `#wardriving`, but defaults to
-**false** — wardriving is on by default, and adding a channel to your radio on
-upgrade shouldn't happen silently.
+```
+TGP|<origin>|<seq>|<sent_epoch>|<interval>
+TGP|magicmirror|148|1790011252|300
+```
 
-It's **off by default** because, unlike everything else here, it transmits on a
-schedule. With no such channel on the node it logs one line and stays off.
+It arrives with the **transmitting node's advert name prepended** — channel
+messages carry no sender key, so that prefix is how identity travels:
 
-What this measures is **one direction of one link**: the share of a peer's
-transmissions that reached *us*. A peer at 40% isn't necessarily transmitting
-badly — we may be hearing it badly — which is the useful distinction when siting
-a node. Compare the same peer's figure across relays to tell them apart.
+```
+PaulTelegram: TGP|magicmirror|148|1790011252|300
+```
 
-Probes arrive as `<node name>: TGP|...` — the node prepends its own advert
-name to channel messages, since a channel message carries no sender key — so
-the parser locates the body rather than assuming it starts at the first
-character. The node name is logged alongside the probe's own origin, which is
-useful when a relay's id and its radio's name differ.
+Both names are kept: `origin` is the relay's `PROPTEST_ID`, the prefix is the
+radio's advert name, and they often differ. Trailing fields are ignored, so a
+newer relay can extend the format without older ones rejecting its probes.
 
-Expected counts come from the span covered and the sender's own interval,
-carried in each probe, not from sequence numbers: a relay that reboots restarts
-its counter, and counting that gap as loss would slander a healthy link. The
-probe format tolerates extra trailing fields, so a newer relay can add to it
-without older ones rejecting the probes.
+### The log
+
+`PROPTEST_LOG` (default `proptest.csv`), one row per probe **heard** — the
+relay's own beacons aren't logged, since whether they landed is only visible in
+*other* relays' logs:
+
+| Column | Meaning |
+| --- | --- |
+| `heard_epoch` | when we received it |
+| `origin` | the sending relay's `PROPTEST_ID` |
+| `seq` | sender's counter, for spotting duplicates and reboots |
+| `sent_epoch` | when the sender stamped it — compare for delay |
+| `interval` | the sender's beacon period, used to compute "expected" |
+| `snr` / `path_len` | signal quality and hop count for that reception |
+
+The file is created with its header at startup, so its existence confirms the
+feature is running rather than only appearing after a first reception.
+
+```bash
+column -s, -t /opt/openhop-telegram-relay/proptest.csv | tail
+```
+
+Nothing prunes it. At 5-minute intervals that's 1–2k rows a day; fine for a long
+time, but rotate it eventually.
+
+### When it shows nothing
+
+In order:
+
+1. **`wc -l proptest.csv`** — 1 means header only, nothing heard yet.
+2. **`/proptest`** — the live block above tells you whether this relay is
+   beaconing, and whether *anything* has arrived on that channel. Traffic
+   arriving but no probes means the receive path works and the senders are the
+   question.
+3. **Is more than one relay enabled?** With one beaconing relay there is
+   nothing to hear.
+4. **Watch the wire:**
+
+   ```bash
+   sudo -u openhop python3 scripts/watch_events.py --pause
+   ```
+
+   Look for `channel_message` with a `channel_idx` matching the channel table it
+   prints. `--pause` matters: OpenHop accepts **one companion client per
+   endpoint**, so a watcher on the relay's port is dropped instantly.
+5. **Check the channel keys agree.** The table shows a `hash` per channel; it
+   must match across relays. A channel created as `tgmeshtest` rather than
+   `#tgmeshtest` has a different key and will hear nobody.
 
 > Airtime: one probe per relay per interval, forever, on a shared channel. Five
 > minutes across a handful of relays is modest; don't shorten it without
-> thinking about who else is listening.
+> considering who else is listening.
 
 ## Reconnection
 
@@ -586,6 +685,12 @@ hour):
 Coordinates appear only when the wardriver broadcasts them — MeshMapper only
 appends GPS to the on-air message when "Broadcast My Coordinates" is on, so the
 second line above is the normal case, not a failure.
+
+**When there is a position, a Telegram map pin follows the alert**, so you can
+tap it rather than reading decimals. The same applies to newly seen nodes that
+advertise a location. A node advertising `0,0` (location sharing off) gets no
+pin, and neither does anything out of range. `SEND_LOCATION_PINS=false` turns
+them off — it costs one extra chat message per located alert.
 
 The quiet period measures from their **last** transmission, so a wardriver
 working an area for an hour produces one alert, not one per ping. They become
