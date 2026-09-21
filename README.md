@@ -324,6 +324,12 @@ transmissions that reached *us*. A peer at 40% isn't necessarily transmitting
 badly — we may be hearing it badly — which is the useful distinction when siting
 a node. Compare the same peer's figure across relays to tell them apart.
 
+Probes arrive as `<node name>: TGP|...` — the node prepends its own advert
+name to channel messages, since a channel message carries no sender key — so
+the parser locates the body rather than assuming it starts at the first
+character. The node name is logged alongside the probe's own origin, which is
+useful when a relay's id and its radio's name differ.
+
 Expected counts come from the span covered and the sender's own interval,
 carried in each probe, not from sequence numbers: a relay that reboots restarts
 its counter, and counting that gap as loss would slander a healthy link. The

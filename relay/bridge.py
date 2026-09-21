@@ -924,8 +924,9 @@ class Bridge:
         )
         self._probes_heard += 1
         log.info(
-            "Heard probe from %s (seq %s, SNR %s, %s hop(s))",
+            "Heard probe from %s%s (seq %s, SNR %s, %s hop(s))",
             probe.origin,
+            f" via {probe.node}" if probe.node else "",
             probe.seq,
             payload.get("SNR"),
             payload.get("path_len"),

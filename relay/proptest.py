@@ -17,6 +17,7 @@ from __future__ import annotations
 import csv
 import logging
 import os
+import re
 import statistics
 import time
 from dataclasses import dataclass
@@ -30,12 +31,21 @@ PREFIX = "TGP"
 COLUMNS = ["heard_epoch", "origin", "seq", "sent_epoch", "interval", "snr", "path_len"]
 
 
+# Channel messages arrive as "<sender node name>: <text>" -- the node prepends
+# its own advert name, since a channel message carries no sender key. So the
+# probe body has to be located rather than assumed to start at character zero.
+_BODY_RE = re.compile(r"(?i)\bTGP\|")
+
+
 @dataclass
 class Probe:
     origin: str
     seq: int
     sent: float
     interval: float
+    # The transmitting node's advert name, when the prefix carried one. Kept
+    # for the log line; `origin` is the relay's own id and is what we key on.
+    node: str = ""
 
 
 def format_probe(origin: str, seq: int, interval: float) -> str:
@@ -45,9 +55,16 @@ def format_probe(origin: str, seq: int, interval: float) -> str:
 
 
 def parse_probe(text: str) -> Optional[Probe]:
-    """Read a probe, ignoring anything appended by a future version."""
-    parts = (text or "").strip().split("|")
-    if len(parts) < 3 or parts[0].strip().upper() != PREFIX:
+    """Read a probe, ignoring a sender-name prefix and any future fields."""
+    raw = (text or "").strip()
+    match = _BODY_RE.search(raw)
+    if match is None:
+        return None
+
+    # Anything before the body is the node name the firmware prepended.
+    node = raw[: match.start()].strip().rstrip(":").strip()
+    parts = raw[match.start() :].split("|")
+    if len(parts) < 3:
         return None
 
     origin = parts[1].strip()
@@ -65,6 +82,7 @@ def parse_probe(text: str) -> Optional[Probe]:
         seq=int(number(2, 0)),
         sent=number(3, time.time()),
         interval=number(4, 0) or 0.0,
+        node=node,
     )
 
 
