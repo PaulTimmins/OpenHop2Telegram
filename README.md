@@ -240,6 +240,31 @@ collide with each other. `MESH_MAX_PARTS` caps how many transmissions one
 message may become — beyond that it isn't sent, and **the sender is told in
 Telegram** rather than the tail quietly vanishing.
 
+## Diagnosing what a node is actually sending
+
+`scripts/watch_events.py` prints the node's channel table and then every event
+it emits, subscribing to *all* event types rather than the few the relay
+handles — so a message arriving under an unexpected type or channel index shows
+up instead of being silently unhandled:
+
+```bash
+sudo -u openhop python3 scripts/watch_events.py --port 5002
+```
+
+```
+Channels on this node:
+  index 0: 'Public'  (hash a3)
+  index 1: 'wardriving'  (hash 7f)
+  index 2: '#tgmeshtest'  (hash c1)
+
+[13:22:04] channel_message: channel_idx=2, text='TGP|magicmirror|148|…', SNR=11.75, path_len=1
+```
+
+That answers directly whether a message reached the node, on which index, and
+whether the index matches the channel you expect. Give it its own endpoint
+(`--port`) or `--pause` the relay: two companion clients on one endpoint split
+the node's message queue.
+
 ## Propagation testing
 
 Each relay can beacon a tiny probe on a dedicated channel, and every relay logs
