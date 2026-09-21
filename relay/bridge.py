@@ -14,6 +14,7 @@ from .config import NODE_TYPES, Config
 from .commands import CommandRouter
 from .coordination import Coordinator
 from .nodes import SeenNodes, describe, type_code
+from .proptest import ProbeLog, format_probe, parse_probe
 from .wardriving import WardriverLog, format_alert, parse_sighting
 from .telegram import TelegramClient
 
@@ -21,6 +22,34 @@ log = logging.getLogger("relay.bridge")
 
 # How many channel slots to probe when resolving a channel by name.
 _MAX_CHANNEL_SCAN = 16
+
+
+def _split_words(text: str, limit: int) -> list[str]:
+    """Break text into pieces of at most `limit`, on word boundaries."""
+    words = (text or "").split()
+    if not words:
+        return [""]
+
+    chunks: list[str] = []
+    current = ""
+    for word in words:
+        # A single word longer than the limit has to be cut somewhere.
+        while len(word) > limit:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(word[:limit])
+            word = word[limit:]
+
+        candidate = f"{current} {word}" if current else word
+        if len(candidate) <= limit:
+            current = candidate
+        else:
+            chunks.append(current)
+            current = word
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 class Bridge:
@@ -36,6 +65,10 @@ class Bridge:
         self._paused = False
         self._poll_task: Optional[asyncio.Task] = None
         self._wardriving_idx: Optional[int] = None
+        self._proptest_idx: Optional[int] = None
+        self._probes = ProbeLog(config.proptest_log)
+        self._probe_seq = 0
+        self._probe_task: Optional[asyncio.Task] = None
         self._wardrivers = WardriverLog(config.wardriving_log_file)
         self._wardriving_re = (
             re.compile(config.wardriving_pattern)
@@ -54,6 +87,8 @@ class Bridge:
                 mesh_getter=lambda: self._mesh,
                 metrics_path=config.metrics_csv,
                 sync_config_path=config.sync_config_path,
+                proptest_log=config.proptest_log,
+                proptest_interval=config.proptest_interval,
             )
             if config.commands_enabled
             else None
@@ -184,10 +219,17 @@ class Bridge:
         if cfg.wardriving_enabled:
             await self._setup_wardriving()
 
+        if cfg.proptest_enabled:
+            await self._setup_proptest()
+
         # Subscribe before auto-fetch starts, or messages drained in between
         # arrive with no handler attached and are lost. One subscription serves
         # both the relayed channel and wardriving; the handler routes by index.
-        if cfg.relay_mesh_to_tg or self._wardriving_idx is not None:
+        if (
+            cfg.relay_mesh_to_tg
+            or self._wardriving_idx is not None
+            or self._proptest_idx is not None
+        ):
             self._mesh.subscribe(EventType.CHANNEL_MSG_RECV, self._on_mesh_message)
 
         if cfg.notify_new_nodes:
@@ -282,6 +324,16 @@ class Bridge:
 
     async def _teardown_session(self) -> None:
         """Drop the current mesh session so the next attempt starts clean."""
+        for attr in ("_poll_task", "_probe_task"):
+            running = getattr(self, attr, None)
+            if running is not None:
+                setattr(self, attr, None)
+                running.cancel()
+                try:
+                    await running
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+
         task, self._poll_task = self._poll_task, None
         if task is not None:
             task.cancel()
@@ -339,6 +391,10 @@ class Bridge:
 
         if self._wardriving_idx is not None and idx == self._wardriving_idx:
             await self._on_wardriving_message(text)
+            return
+
+        if self._proptest_idx is not None and idx == self._proptest_idx:
+            self._on_probe(payload, text)
             return
 
         if idx != self._channel_idx or not self._cfg.relay_mesh_to_tg:
@@ -591,29 +647,149 @@ class Bridge:
                 )
                 continue
 
-            body = self._format_outgoing(message, text)
-            log.info("tg -> mesh: %s", body)
-            try:
-                result = await mesh.commands.send_chan_msg(self._channel_idx, body)
-                if getattr(result, "type", None) == EventType.ERROR:
-                    log.warning("Mesh send error: %s", result.payload)
-                    await self._tg.send_message(f"⚠️ Mesh rejected that: {result.payload}")
-            except Exception as exc:  # noqa: BLE001
-                log.warning("Failed to send to mesh: %s", exc)
-                await self._tg.send_message(f"⚠️ Failed to send that to the mesh: {exc}")
+            parts = self._format_outgoing(message, text)
 
-    def _format_outgoing(self, message: dict, text: str) -> str:
+            # Splitting is better than truncating, but a very long message
+            # would still monopolise a shared channel, so there's a ceiling.
+            limit = self._cfg.mesh_max_parts
+            dropped = 0
+            if limit > 0 and len(parts) > limit:
+                dropped = len(parts) - limit
+                parts = parts[:limit]
+
+            failed = None
+            for index, body in enumerate(parts):
+                if index:
+                    # Space the transmissions out; back to back they hog the
+                    # channel and are more likely to collide.
+                    await asyncio.sleep(self._cfg.mesh_part_delay)
+                log.info("tg -> mesh: %s", body)
+                try:
+                    result = await mesh.commands.send_chan_msg(
+                        self._channel_idx, body
+                    )
+                    if getattr(result, "type", None) == EventType.ERROR:
+                        failed = str(result.payload)
+                        log.warning("Mesh send error: %s", result.payload)
+                        break
+                except Exception as exc:  # noqa: BLE001
+                    failed = str(exc)
+                    log.warning("Failed to send to mesh: %s", exc)
+                    break
+
+            if failed is not None:
+                await self._tg.send_message(
+                    f"⚠️ Only {index} of {len(parts)} part(s) went out — {failed}"
+                )
+            elif dropped:
+                # Say so rather than let the tail vanish silently.
+                await self._tg.send_message(
+                    f"⚠️ That was too long for the mesh: sent {len(parts)} part(s), "
+                    f"dropped {dropped} more. Raise MESH_MAX_PARTS or send less."
+                )
+            elif len(parts) > 1:
+                log.info("Sent as %d parts", len(parts))
+
+    def _format_outgoing(self, message: dict, text: str) -> list[str]:
+        """Build the mesh transmission(s) for one Telegram message.
+
+        A message too long for a single LoRa payload is split across several
+        rather than cut off: half a sentence arriving on the mesh leaves people
+        guessing at the rest. Each part carries the sender and an (n/m) marker
+        so it stands on its own and the order is obvious.
+        """
         who = (message.get("from", {}) or {}).get("first_name", "").strip()
-        parts = []
+        prefix_bits = []
         if self._cfg.tg_to_mesh_prefix:
-            parts.append(self._cfg.tg_to_mesh_prefix)
+            prefix_bits.append(self._cfg.tg_to_mesh_prefix)
         if who:
-            parts.append(f"{who}:")
-        parts.append(text)
-        body = " ".join(parts)
-        if len(body) > self._cfg.mesh_max_chars:
-            body = body[: self._cfg.mesh_max_chars - 1].rstrip() + "…"
-        return body
+            prefix_bits.append(who)
+        prefix = " ".join(prefix_bits)
+
+        limit = self._cfg.mesh_max_chars
+        single = f"{prefix}: {text}" if prefix else text
+        if len(single) <= limit:
+            return [single]
+
+        # Reserve room for the widest marker the split could need. Estimated
+        # from an initial split, then re-split once the real cost is known.
+        chunks = _split_words(text, max(1, limit - len(prefix) - 10))
+        marker_width = len(f" ({len(chunks)}/{len(chunks)})")
+        room = max(1, limit - len(prefix) - 2 - marker_width)
+        chunks = _split_words(text, room)
+
+        total = len(chunks)
+        out = []
+        for index, chunk in enumerate(chunks, start=1):
+            head = f"{prefix} ({index}/{total})" if prefix else f"({index}/{total})"
+            out.append(f"{head}: {chunk}")
+        return out
+
+    # --- propagation testing ----------------------------------------------
+
+    async def _setup_proptest(self) -> None:
+        """Find the probe channel and start beaconing on it."""
+        cfg = self._cfg
+        self._proptest_idx = await self._find_channel(cfg.proptest_channel)
+        if self._proptest_idx is None:
+            log.info(
+                "No %r channel on this node; propagation testing is off. Add the "
+                "channel (same name and key on every relay) to enable it.",
+                cfg.proptest_channel,
+            )
+            return
+
+        log.info(
+            "Propagation testing on %r (index %d) as %r every %.0fs",
+            cfg.proptest_channel,
+            self._proptest_idx,
+            cfg.proptest_id,
+            cfg.proptest_interval,
+        )
+        if cfg.proptest_interval > 0:
+            self._probe_task = asyncio.create_task(
+                self._beacon_loop(), name="proptest-beacon"
+            )
+
+    async def _beacon_loop(self) -> None:
+        cfg = self._cfg
+        while True:
+            try:
+                # Wait first: beaconing the instant we connect would put every
+                # relay's probe on air together after a shared outage.
+                await asyncio.sleep(cfg.proptest_interval)
+                if self._mesh is None or self._proptest_idx is None:
+                    continue
+                self._probe_seq += 1
+                body = format_probe(
+                    cfg.proptest_id, self._probe_seq, cfg.proptest_interval
+                )
+                result = await self._mesh.commands.send_chan_msg(
+                    self._proptest_idx, body
+                )
+                if getattr(result, "type", None) == EventType.ERROR:
+                    log.warning("Probe send failed: %s", result.payload)
+                else:
+                    log.debug("Sent probe %s", body)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - keep beaconing regardless
+                log.exception("Probe beacon failed; will retry")
+
+    def _on_probe(self, payload: dict, text: str) -> None:
+        probe = parse_probe(text)
+        if probe is None:
+            log.debug("Unreadable probe on the test channel: %r", text)
+            return
+        if probe.origin.strip().lower() == self._cfg.proptest_id.strip().lower():
+            return  # our own beacon looping back
+
+        self._probes.record(
+            probe,
+            snr=payload.get("SNR"),
+            path_len=payload.get("path_len"),
+        )
+        log.debug("Heard probe %s#%s", probe.origin, probe.seq)
 
     # --- wardriving -------------------------------------------------------
 

@@ -156,6 +156,7 @@ Answered in the configured chat:
 | `/telemetry <node>` | Ask a node for a live status + telemetry reading. |
 | `/ping <node>` | Whether it answers, how long it took, and how it's routed. |
 | `/traceroute <node>` | The route there, hop by hop with per-hop SNR. `/trace` also works. |
+| `/proptest [hours]` | Probe delivery from each relay over time. `/prop` also works. |
 | `/help` | The list above. |
 
 `/battery` sends a plotted PNG when `matplotlib` is installed, and a unicode
@@ -193,10 +194,6 @@ boundaries, rather than cut short — a node list or a trace is only useful whol
 The same applies to a `/battery` caption: captions have a much smaller limit than
 messages, so the overflow follows the photo as ordinary messages.
 
-(The `MESH_MAX_CHARS` truncation on Telegram → mesh is unrelated and stays: a
-LoRa payload is a hard radio limit, and splitting one chat line into several
-transmissions would flood a shared channel.)
-
 Commands are handled instead of being relayed, so they never reach the mesh. An
 **unrecognised** command is left alone entirely, in case another bot in the group
 owns it. Anyone who can post in the chat can run these; set
@@ -213,6 +210,66 @@ ping - is a node reachable, and how fast
 traceroute - the route to a node, hop by hop
 help - list commands
 ```
+
+## Telegram → mesh splitting
+
+A message longer than `MESH_MAX_CHARS` is **split across several
+transmissions**, on word boundaries, each carrying the sender and an `(n/m)`
+marker:
+
+```
+[tg] Ann (1/3): the first part of what she said
+[tg] Ann (2/3): the middle of it
+[tg] Ann (3/3): and the end
+```
+
+Parts go out `MESH_PART_DELAY` seconds apart so they don't hog the channel or
+collide with each other. `MESH_MAX_PARTS` caps how many transmissions one
+message may become — beyond that it isn't sent, and **the sender is told in
+Telegram** rather than the tail quietly vanishing.
+
+## Propagation testing
+
+Each relay can beacon a tiny probe on a dedicated channel, and every relay logs
+the probes it hears. `/proptest` then reports delivery over time:
+
+```
+📶 Probe delivery, last 24h
+
+HillRelay
+  ██████████ 100%  (12/12)
+  last 4m ago  SNR +8.0
+
+FarRelay
+  ███░░░░░░░ 33%  (4/12)
+  last 21m ago  SNR -4.5
+```
+
+Set it up on **every** relay, each with the same channel name *and key*:
+
+```bash
+PROPTEST_ENABLED=true
+PROPTEST_CHANNEL=tgmeshtest
+PROPTEST_INTERVAL=300
+```
+
+It's **off by default** because, unlike everything else here, it transmits on a
+schedule. With no such channel on the node it logs one line and stays off.
+
+What this measures is **one direction of one link**: the share of a peer's
+transmissions that reached *us*. A peer at 40% isn't necessarily transmitting
+badly — we may be hearing it badly — which is the useful distinction when siting
+a node. Compare the same peer's figure across relays to tell them apart.
+
+Expected counts come from the span covered and the sender's own interval,
+carried in each probe, not from sequence numbers: a relay that reboots restarts
+its counter, and counting that gap as loss would slander a healthy link. The
+probe format tolerates extra trailing fields, so a newer relay can add to it
+without older ones rejecting the probes.
+
+> Airtime: one probe per relay per interval, forever, on a shared channel. Five
+> minutes across a handful of relays is modest; don't shorten it without
+> thinking about who else is listening.
 
 ## Reconnection
 

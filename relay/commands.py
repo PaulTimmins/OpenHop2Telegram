@@ -38,6 +38,7 @@ HELP = """Available commands:
 /telemetry <node> — ask a node for a live reading
 /ping <node> — is it reachable, and how long does it take
 /traceroute <node> — the route there, hop by hop with SNR
+/proptest [hours] — probe delivery from each relay (default 24h)
 /help — this list"""
 
 
@@ -224,6 +225,8 @@ class CommandRouter:
         mesh_getter: Callable[[], Any],
         metrics_path: str,
         sync_config_path: str = "time_sync.json",
+        proptest_log: str = "proptest.csv",
+        proptest_interval: float = 300.0,
         request_timeout: float = 30.0,
     ):
         self._store = store
@@ -231,6 +234,8 @@ class CommandRouter:
         self._mesh = mesh_getter
         self._metrics_path = metrics_path
         self._sync_config_path = sync_config_path
+        self._proptest_log = proptest_log
+        self._proptest_interval = proptest_interval
         self._timeout = request_timeout
 
     async def handle(self, text: str) -> bool:
@@ -252,6 +257,8 @@ class CommandRouter:
             "ping": self._ping,
             "traceroute": self._traceroute,
             "trace": self._traceroute,
+            "proptest": self._proptest,
+            "prop": self._proptest,
         }.get(name)
 
         if handler is None:
@@ -445,6 +452,43 @@ class CommandRouter:
         else:
             lines.append("  (no telemetry reply)")
 
+        await self._say("\n".join(lines))
+
+    # --- /proptest ----------------------------------------------------------
+
+    async def _proptest(self, args: str) -> None:
+        from .proptest import ProbeLog, bar, summarise
+
+        hours = 24.0
+        for token in args.split():
+            try:
+                hours = max(0.1, float(token))
+            except ValueError:
+                pass
+
+        rows = ProbeLog(self._proptest_log).rows(hours=hours)
+        results = summarise(rows, fallback_interval=self._proptest_interval)
+        if not results:
+            await self._say(
+                f"No probes heard in the last {hours:g}h.\n"
+                f"Propagation testing needs PROPTEST_ENABLED=true and a "
+                f"channel named in PROPTEST_CHANNEL, present on every relay "
+                f"with the same key."
+            )
+            return
+
+        lines = [f"📶 Probe delivery, last {hours:g}h"]
+        for r in results:
+            snr = f"  SNR {r.snr:+.1f}" if r.snr is not None else ""
+            lines.append(
+                f"\n{r.origin}\n"
+                f"  {bar(r.rate)} {r.rate:.0f}%  ({r.heard}/{r.expected})\n"
+                f"  last {ago(r.last)} ago{snr}"
+            )
+        lines.append(
+            "\nThis is what reached us from each relay, so a low figure can "
+            "be either end of the link."
+        )
         await self._say("\n".join(lines))
 
     # --- /ping ------------------------------------------------------------

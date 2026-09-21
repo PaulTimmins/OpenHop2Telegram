@@ -28,6 +28,13 @@ NODE_TYPE_ALIASES = {
 }
 
 
+def _default_probe_id() -> str:
+    """Identify this relay in probes. The hostname is unique enough locally."""
+    import socket
+
+    return socket.gethostname().split(".")[0][:24] or "relay"
+
+
 def _parse_bool(value: str, default: bool) -> bool:
     value = value.strip().lower()
     if not value:
@@ -75,6 +82,8 @@ class Config:
     direction: str
     tg_to_mesh_prefix: str
     mesh_max_chars: int
+    mesh_max_parts: int
+    mesh_part_delay: float
     log_level: str
     notify_new_nodes: bool
     notify_node_types: frozenset[str]
@@ -95,6 +104,11 @@ class Config:
     commands_enabled: bool
     metrics_csv: str
     sync_config_path: str
+    proptest_enabled: bool
+    proptest_channel: str
+    proptest_interval: float
+    proptest_id: str
+    proptest_log: str
     # Endpoint the maintenance scripts use. Defaults to the relay's, but can
     # point somewhere else (a second companion port, a proxy, another node) so
     # the scripts don't share the relay's message queue.
@@ -135,6 +149,8 @@ class Config:
             direction=direction,
             tg_to_mesh_prefix=os.getenv("TG_TO_MESH_PREFIX", "[tg]"),
             mesh_max_chars=int(os.getenv("MESH_MAX_CHARS", "140")),
+            mesh_max_parts=int(os.getenv("MESH_MAX_PARTS", "4")),
+            mesh_part_delay=float(os.getenv("MESH_PART_DELAY", "3")),
             log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper(),
             notify_new_nodes=_parse_bool(os.getenv("NOTIFY_NEW_NODES", ""), True),
             notify_node_types=_parse_node_types(os.getenv("NOTIFY_NODE_TYPES", "all")),
@@ -167,6 +183,15 @@ class Config:
             sync_config_path=os.getenv(
                 "TIME_SYNC_CONFIG", "time_sync.json"
             ).strip(),
+            # Off by default: unlike the other features this one transmits on
+            # a schedule, which is not something to switch on for someone.
+            proptest_enabled=_parse_bool(os.getenv("PROPTEST_ENABLED", ""), False),
+            proptest_channel=os.getenv("PROPTEST_CHANNEL", "tgmeshtest").strip(),
+            proptest_interval=float(os.getenv("PROPTEST_INTERVAL", "300")),
+            proptest_id=(
+                os.getenv("PROPTEST_ID", "").strip() or _default_probe_id()
+            ),
+            proptest_log=os.getenv("PROPTEST_LOG", "proptest.csv").strip(),
             timesync_host=(
                 os.getenv("TIMESYNC_HOST", "").strip()
                 or os.getenv("OPENHOP_HOST", "127.0.0.1").strip()
