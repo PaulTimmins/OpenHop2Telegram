@@ -261,9 +261,20 @@ Channels on this node:
 ```
 
 That answers directly whether a message reached the node, on which index, and
-whether the index matches the channel you expect. Give it its own endpoint
-(`--port`) or `--pause` the relay: two companion clients on one endpoint split
-the node's message queue.
+whether the index matches the channel you expect.
+
+**OpenHop's companion server accepts one client per endpoint.** Pointing this at
+the port the relay is using gets it dropped immediately with
+`disconnected: tcp_disconnect` — it warns when it can tell that's about to
+happen. Either give it a spare endpoint (`--port 5002`) or take the relay's
+turn:
+
+```bash
+sudo -u openhop python3 scripts/watch_events.py --pause
+```
+
+`--pause` uses the same handshake as the clock checker: the relay drops its
+session, the watcher runs, and the relay reconnects on its own afterwards.
 
 ## Propagation testing
 

@@ -27,6 +27,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from meshcore import EventType, MeshCore  # noqa: E402
 
 from relay.config import Config  # noqa: E402
+from relay.coordination import Coordinator  # noqa: E402
 from relay.logging_setup import configure  # noqa: E402
 
 # Printed compactly when present; everything else is dumped as JSON.
@@ -55,6 +56,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--seconds", type=float, default=0.0, help="stop after this long (0 = forever)"
     )
+    p.add_argument(
+        "--pause",
+        action="store_true",
+        help="ask the running relay to release the node first. OpenHop's "
+        "companion server takes one client per endpoint, so without this a "
+        "watcher on the relay's port is dropped straight away.",
+    )
+    p.add_argument("--pause-timeout", type=float, default=90.0)
     p.add_argument("--log-level", default="WARNING")
     return p.parse_args()
 
@@ -90,8 +99,43 @@ async def main() -> int:
     port = args.port or cfg.timesync_port
     wanted = {w.strip().lower() for w in args.only.split(",") if w.strip()}
 
+    coord = Coordinator(cfg.lock_dir)
+    paused = False
+    if args.pause:
+        pid = coord.relay_pid()
+        if pid is None:
+            print("No relay is holding the node; connecting directly.")
+        else:
+            print(f"Asking the relay (pid {pid}) to release the node …")
+            coord.request_pause()
+            waited = 0.0
+            while waited < args.pause_timeout and not coord.relay_has_released():
+                await asyncio.sleep(0.5)
+                waited += 0.5
+            if not coord.relay_has_released():
+                coord.release_request()
+                print(
+                    f"Relay didn't release within {args.pause_timeout:.0f}s.",
+                    file=sys.stderr,
+                )
+                return 1
+            paused = True
+            print(f"Released after {waited:.0f}s.\n")
+    elif coord.relay_pid() and (host, port) == (cfg.openhop_host, cfg.openhop_port):
+        print(
+            "WARNING: the relay is connected on this endpoint. OpenHop allows "
+            "one companion client per port, so this will be dropped "
+            "immediately. Use --pause, or a different --port.\n",
+            file=sys.stderr,
+        )
+
     print(f"Connecting to {host}:{port} …")
-    mesh = await MeshCore.create_tcp(host, port)
+    try:
+        mesh = await MeshCore.create_tcp(host, port)
+    except Exception:
+        if paused:
+            coord.release_request()
+        raise
     try:
         await mesh.start_auto_message_fetching()
         await show_channels(mesh)
@@ -100,6 +144,13 @@ async def main() -> int:
 
         async def on_any(event) -> None:
             kind = getattr(getattr(event, "type", None), "value", str(event.type))
+            if kind == "disconnected":
+                # Worth calling out: on this endpoint it usually means another
+                # companion client took the single slot.
+                print(
+                    "\n*** disconnected — another companion client probably "
+                    "took the slot on this endpoint ***"
+                )
             seen[kind] = seen.get(kind, 0) + 1
             if wanted and kind not in wanted:
                 return
@@ -135,7 +186,12 @@ async def main() -> int:
             await mesh.stop_auto_message_fetching()
         except Exception:  # noqa: BLE001
             pass
-        await mesh.disconnect()
+        try:
+            await mesh.disconnect()
+        finally:
+            if paused:
+                coord.release_request()
+                print("Node handed back to the relay.")
     return 0
 
 
