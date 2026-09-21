@@ -14,6 +14,31 @@ except ImportError:  # python-dotenv is optional at runtime
 
 DIRECTIONS = {"both", "mesh_to_tg", "tg_to_mesh"}
 
+# MeshCore sizes a path hop hash at 1, 2, 4 or 8 bytes, selected by the low two
+# bits of the trace flags (1 << s). It's a property of how the mesh is set up,
+# so it's configured once and used for both the hops in a trace and the width
+# of key prefixes shown, which lets a hop in /traceroute be matched against a
+# node in /nodes.
+PATH_HASH_BYTES_ALLOWED = (1, 2, 4, 8)
+
+
+def _parse_path_hash_bytes(raw: str) -> int:
+    raw = (raw or "").strip()
+    if not raw:
+        return 2
+    try:
+        value = int(raw)
+    except ValueError:
+        raise SystemExit(
+            f"PATH_HASH_BYTES must be an integer, got {raw!r} "
+            f"(allowed: {PATH_HASH_BYTES_ALLOWED})"
+        )
+    if value not in PATH_HASH_BYTES_ALLOWED:
+        raise SystemExit(
+            f"PATH_HASH_BYTES must be one of {PATH_HASH_BYTES_ALLOWED}, got {value}"
+        )
+    return value
+
 # Contact type codes used by MeshCore, plus friendly aliases accepted in config.
 NODE_TYPES = {"NONE", "CLI", "REP", "ROOM", "SENS"}
 NODE_TYPE_ALIASES = {
@@ -113,11 +138,22 @@ class Config:
     proptest_create_channel: bool
     relay_name: str
     send_location_pins: bool
+    path_hash_bytes: int
     # Endpoint the maintenance scripts use. Defaults to the relay's, but can
     # point somewhere else (a second companion port, a proxy, another node) so
     # the scripts don't share the relay's message queue.
     timesync_host: str
     timesync_port: int
+
+    @property
+    def key_hex_chars(self) -> int:
+        """Hex characters to show for a key prefix, matching the path width."""
+        return self.path_hash_bytes * 2
+
+    @property
+    def trace_flags(self) -> int:
+        """send_trace flags encoding this hash width (1 << s)."""
+        return PATH_HASH_BYTES_ALLOWED.index(self.path_hash_bytes)
 
     @property
     def relay_mesh_to_tg(self) -> bool:
@@ -212,6 +248,7 @@ class Config:
             send_location_pins=_parse_bool(
                 os.getenv("SEND_LOCATION_PINS", ""), True
             ),
+            path_hash_bytes=_parse_path_hash_bytes(os.getenv("PATH_HASH_BYTES", "")),
             timesync_host=(
                 os.getenv("TIMESYNC_HOST", "").strip()
                 or os.getenv("OPENHOP_HOST", "127.0.0.1").strip()

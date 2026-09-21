@@ -252,6 +252,7 @@ async def run(args: argparse.Namespace) -> int:
                 MetricsWriter(args.metrics),
                 attempts=sync_cfg.attempts,
                 retry_delay=sync_cfg.retry_delay,
+                key_hex_chars=cfg.key_hex_chars,
             )
         )
         if collector is not None:

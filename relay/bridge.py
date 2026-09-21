@@ -97,6 +97,7 @@ class Bridge:
                 telegram=None,  # set once the client exists
                 mesh_getter=lambda: self._mesh,
                 metrics_path=config.metrics_csv,
+                path_hash_bytes=config.path_hash_bytes,
                 sync_config_path=config.sync_config_path,
                 proptest_log=config.proptest_log,
                 proptest_interval=config.proptest_interval,
@@ -468,13 +469,13 @@ class Bridge:
         assert self._tg is not None
         await self._tg.send_message(f"\U0001F4E1 {sender}: {text}" if sender else f"\U0001F4E1 {text}")
 
-    @staticmethod
-    def _format_sender(payload: dict) -> str:
+    def _format_sender(self, payload: dict) -> str:
+        """Sender prefix, at the configured path hash width."""
         prefix = payload.get("pubkey_prefix") or payload.get("sender") or ""
         if isinstance(prefix, (bytes, bytearray)):
             prefix = prefix.hex()
         prefix = str(prefix)
-        return prefix[:6] if prefix else ""
+        return prefix[: self._cfg.key_hex_chars] if prefix else ""
 
     # --- new node announcements -------------------------------------------
 
@@ -686,7 +687,7 @@ class Bridge:
         if not self._seen.add(pubkey, contact, heard=heard):
             return  # already announced
 
-        text = describe(contact)
+        text = describe(contact, self._cfg.key_hex_chars)
         log.info("new node via %s -> tg: %s", source, text.replace("\n", " | "))
         if self._tg is not None:
             await self._tg.send_message(text)

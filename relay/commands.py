@@ -98,17 +98,28 @@ def describe_path(contact: dict) -> str:
     return f"{length} hop(s)"
 
 
-def path_hashes(contact: dict) -> list[str]:
-    """The stored route as a list of per-hop hashes, oldest hop first."""
+def path_hashes(contact: dict, default_bytes: int = 2) -> tuple[list[str], int]:
+    """The stored route as per-hop hashes, plus the byte width they use.
+
+    The width comes from the contact's own record where it has one: splitting a
+    stored path at any other width yields nonsense hops. `default_bytes` is the
+    configured radio setting, used only when the record doesn't say.
+    """
     if not isinstance(contact, dict):
-        return []
+        return [], default_bytes
     raw = contact.get("out_path") or ""
     length = contact.get("out_path_len") or 0
     if not raw or length <= 0:
-        return []
-    # Each hop is (hash_mode + 1) bytes, i.e. twice that many hex characters.
-    width = ((contact.get("out_path_hash_mode") or 0) + 1) * 2
-    return [raw[i : i + width] for i in range(0, min(len(raw), width * length), width)]
+        return [], default_bytes
+
+    mode = contact.get("out_path_hash_mode")
+    hash_bytes = default_bytes if mode is None else int(mode) + 1
+    width = hash_bytes * 2
+    hops = [
+        raw[i : i + width]
+        for i in range(0, min(len(raw), width * length), width)
+    ]
+    return [h for h in hops if len(h) == width], hash_bytes
 
 
 def ago(epoch: Optional[float]) -> str:
@@ -224,6 +235,7 @@ class CommandRouter:
         telegram: Any,
         mesh_getter: Callable[[], Any],
         metrics_path: str,
+        path_hash_bytes: int = 2,
         sync_config_path: str = "time_sync.json",
         proptest_log: str = "proptest.csv",
         proptest_interval: float = 300.0,
@@ -234,6 +246,10 @@ class CommandRouter:
         self._tg = telegram
         self._mesh = mesh_getter
         self._metrics_path = metrics_path
+        self._path_hash_bytes = path_hash_bytes
+        # Key prefixes are shown at the same width as a path hop hash, so a hop
+        # printed by /traceroute can be matched against a node in /nodes.
+        self._key_hex = max(2, path_hash_bytes * 2)
         self._sync_config_path = sync_config_path
         self._proptest_log = proptest_log
         self._proptest_interval = proptest_interval
@@ -315,7 +331,7 @@ class CommandRouter:
         lines = [header]
         for recency, key, name, code, record in rows:
             mark = " (superseded)" if record.get("superseded_by") else ""
-            lines.append(f"{code:<5} {name}{mark} — {ago(recency)} ago ({key[:6]})")
+            lines.append(f"{code:<5} {name}{mark} — {ago(recency)} ago ({key[:self._key_hex]})")
         await self._say("\n".join(lines))
 
     # --- /battery ---------------------------------------------------------
@@ -423,12 +439,12 @@ class CommandRouter:
         if status is None and telemetry is None:
             hint = "" if access != "none" else " The login wasn't accepted either."
             await self._say(
-                f"⚠️ {name} ({key[:6]}) didn't answer.{hint} It may be out of range."
+                f"⚠️ {name} ({key[:self._key_hex]}) didn't answer.{hint} It may be out of range."
             )
             return
 
         badge = {"admin": " [admin]", "guest": " [guest]"}.get(access, " [no login]")
-        lines = [f"📻 {name} ({key[:6]}){badge}"]
+        lines = [f"📻 {name} ({key[:self._key_hex]}){badge}"]
         if isinstance(status, dict):
             if status.get("bat"):
                 lines.append(f"  battery {status['bat']}mV")
@@ -569,13 +585,13 @@ class CommandRouter:
 
         if reply is None:
             await self._say(
-                f"❌ {name} ({key[:6]}) — no reply in {elapsed / 1000:.0f}s\n"
+                f"❌ {name} ({key[:self._key_hex]}) — no reply in {elapsed / 1000:.0f}s\n"
                 f"  route: {route}"
             )
             return
 
         lines = [
-            f"✅ {name} ({key[:6]}) — {elapsed:.0f}ms via {via}",
+            f"✅ {name} ({key[:self._key_hex]}) — {elapsed:.0f}ms via {via}",
             f"  route: {route}",
         ]
         if isinstance(reply, dict):
@@ -603,10 +619,10 @@ class CommandRouter:
             return
         key, contact, name = resolved
 
-        hops = path_hashes(contact)
+        hops, hash_bytes = path_hashes(contact, self._path_hash_bytes)
         if not hops:
             await self._say(
-                f"🛣 {name} ({key[:6]}) — {describe_path(contact)}.\n"
+                f"🛣 {name} ({key[:self._key_hex]}) — {describe_path(contact)}.\n"
                 f"There's no stored route to trace. Asking the mesh to find one…"
             )
             await self._discover_path(mesh, contact, name, key)
@@ -616,15 +632,15 @@ class CommandRouter:
             f"🛣 Tracing {name} via {len(hops)} hop(s): {' → '.join(hops)}…"
         )
 
-        result = await self._trace(mesh, hops, name)
+        result = await self._trace(mesh, hops, name, hash_bytes)
         if result is None:
             await self._say(
-                f"❌ No trace reply from {name} ({key[:6]}). The route may be "
+                f"❌ No trace reply from {name} ({key[:self._key_hex]}). The route may be "
                 f"stale — /ping will say whether it answers at all."
             )
             return
 
-        lines = [f"🛣 {name} ({key[:6]})"]
+        lines = [f"🛣 {name} ({key[:self._key_hex]})"]
         nodes = result.get("path") or []
         for index, node in enumerate(nodes, start=1):
             node_hash = node.get("hash")
@@ -639,7 +655,9 @@ class CommandRouter:
             lines.append("  (reply carried no hop details)")
         await self._say("\n".join(lines))
 
-    async def _trace(self, mesh: Any, hops: list[str], name: str) -> Optional[dict]:
+    async def _trace(
+        self, mesh: Any, hops: list[str], name: str, hash_bytes: int = 2
+    ) -> Optional[dict]:
         """Send a trace along `hops` and wait for the matching reply."""
         import random
 
@@ -650,9 +668,13 @@ class CommandRouter:
             return None
 
         tag = random.randint(1, 0xFFFFFFFF)
+        # Pass flags explicitly rather than letting them be inferred, so the
+        # width the node uses is the width these hops actually are.
+        flags = {1: 0, 2: 1, 4: 2, 8: 3}.get(hash_bytes, 1)
         try:
             sent = await asyncio.wait_for(
-                send(tag=tag, path=",".join(hops)), timeout=self._timeout
+                send(tag=tag, path=",".join(hops), flags=flags),
+                timeout=self._timeout,
             )
         except Exception as exc:  # noqa: BLE001
             log.debug("%s: trace could not be sent: %s", name, exc)
@@ -687,16 +709,16 @@ class CommandRouter:
 
         payload = getattr(result, "payload", None) if result is not None else None
         if not isinstance(payload, dict):
-            await self._say(f"❌ No route found to {name} ({key[:6]}).")
+            await self._say(f"❌ No route found to {name} ({key[:self._key_hex]}).")
             return
 
         out_len = payload.get("out_path_len")
         out_path = payload.get("out_path") or ""
         if not out_len:
-            await self._say(f"🛣 {name} ({key[:6]}) — reachable directly, no hops.")
+            await self._say(f"🛣 {name} ({key[:self._key_hex]}) — reachable directly, no hops.")
             return
         await self._say(
-            f"🛣 {name} ({key[:6]}) — found a {out_len} hop route: {out_path}\n"
+            f"🛣 {name} ({key[:self._key_hex]}) — found a {out_len} hop route: {out_path}\n"
             f"Run /traceroute again for per-hop SNR."
         )
 
@@ -723,7 +745,7 @@ class CommandRouter:
             return None
         matches.sort(key=lambda kv: kv[1].get("last_advert") or 0, reverse=True)
         key, contact = matches[0]
-        name = (contact.get("adv_name") or "").strip() or key[:12]
+        name = (contact.get("adv_name") or "").strip() or key[: self._key_hex]
         return key, contact, name
 
     async def _request(self, mesh: Any, method: str, contact: Any, label: str) -> Any:

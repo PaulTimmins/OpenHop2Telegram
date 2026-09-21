@@ -51,14 +51,18 @@ def type_code(contact: dict) -> str:
     return TYPE_CODES.get(contact.get("type"), "NONE")
 
 
-def describe(contact: dict) -> str:
-    """Human-readable one-liner for a newly seen node."""
+def describe(contact: dict, key_hex_chars: int = 4) -> str:
+    """Human-readable one-liner for a newly seen node.
+
+    `key_hex_chars` matches the configured path hash width, so the prefix shown
+    here is the same one a traceroute hop would print.
+    """
     code = type_code(contact)
     label = TYPE_LABELS.get(code, "node")
     emoji = TYPE_EMOJI.get(code, "\U0001F4E1")
 
     name = (contact.get("adv_name") or "").strip() or "(unnamed)"
-    pubkey = (contact.get("public_key") or "")[:6]
+    pubkey = (contact.get("public_key") or "")[:key_hex_chars]
 
     line = f"{emoji} New {label} seen: {name}"
     if pubkey:

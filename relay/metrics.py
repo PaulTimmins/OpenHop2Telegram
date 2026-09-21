@@ -185,11 +185,13 @@ class MetricsCollector:
         timeout: float = 30.0,
         attempts: int = 3,
         retry_delay: float = 5.0,
+        key_hex_chars: int = 4,
     ):
         self._writer = writer
         self._timeout = timeout
         self._attempts = attempts
         self._retry_delay = retry_delay
+        self._key_hex = max(2, key_hex_chars)
 
     async def collect(
         self,
@@ -205,7 +207,7 @@ class MetricsCollector:
                 "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
                 "epoch": now,
                 "node": label,
-                "pubkey": self._pubkey(contact)[:12],
+                "pubkey": self._pubkey(contact)[: self._key_hex],
                 "clock_drift_s": "" if drift is None else drift,
                 "status_ok": "false",
                 "telemetry_ok": "false",
