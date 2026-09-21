@@ -53,6 +53,7 @@ class Bridge:
                 telegram=None,  # set once the client exists
                 mesh_getter=lambda: self._mesh,
                 metrics_path=config.metrics_csv,
+                sync_config_path=config.sync_config_path,
             )
             if config.commands_enabled
             else None

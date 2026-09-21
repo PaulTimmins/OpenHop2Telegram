@@ -154,6 +154,8 @@ Answered in the configured chat:
 | `/nodes [filter]` | Known nodes, most recently heard first. Filter by name or type (`/nodes rep`). |
 | `/battery [node] [days]` | Battery trend from the metrics log (`/battery rogue 3`). |
 | `/telemetry <node>` | Ask a node for a live status + telemetry reading. |
+| `/ping <node>` | Whether it answers, how long it took, and how it's routed. |
+| `/traceroute <node>` | The route there, hop by hop with per-hop SNR. `/trace` also works. |
 | `/help` | The list above. |
 
 `/battery` sends a plotted PNG when `matplotlib` is installed, and a unicode
@@ -168,9 +170,23 @@ writes with `--metrics`, or there will be nothing to plot. Rows with a blank
 battery are skipped rather than plotted as zero, since a gap means the node
 didn't answer, not that it went flat.
 
-`/telemetry` is the only one that costs airtime — it queries the node there and
-then. It resolves a name or key prefix, never picks a key marked superseded, and
-says so plainly if the node doesn't answer.
+`/telemetry` takes the node's admin password from `TIME_SYNC_CONFIG` (the clock
+checker's node list) when there is one. **With no password configured it logs in
+as a guest with a blank one** and reports whatever the node is willing to share —
+a refused login never stops the reading, and the reply is tagged `[admin]`,
+`[guest]` or `[no login]` so it's clear which you got.
+
+`/ping` reports reachability, round-trip time, and whether the node is reached
+directly, over a stored route, or by flood. It doesn't log in at all.
+
+`/traceroute` sends a trace along the node's stored route and reports each hop
+with the SNR it heard. If there's no stored route — a flood contact — it asks
+the mesh to discover one and tells you what it found, so a second
+`/traceroute` can then measure it.
+
+`/telemetry`, `/ping` and `/traceroute` all cost airtime: they query the node
+there and then. They resolve a name or key prefix and never pick a key marked
+superseded.
 
 Commands are handled instead of being relayed, so they never reach the mesh. An
 **unrecognised** command is left alone entirely, in case another bot in the group
@@ -184,6 +200,8 @@ autocomplete in Telegram:
 nodes - known nodes, newest first
 battery - battery trend from the metrics log
 telemetry - ask a node for a live reading
+ping - is a node reachable, and how fast
+traceroute - the route to a node, hop by hop
 help - list commands
 ```
 

@@ -94,6 +94,7 @@ class Config:
     lock_dir: str
     commands_enabled: bool
     metrics_csv: str
+    sync_config_path: str
     # Endpoint the maintenance scripts use. Defaults to the relay's, but can
     # point somewhere else (a second companion port, a proxy, another node) so
     # the scripts don't share the relay's message queue.
@@ -163,6 +164,9 @@ class Config:
             lock_dir=os.getenv("LOCK_DIR", ".").strip() or ".",
             commands_enabled=_parse_bool(os.getenv("COMMANDS_ENABLED", ""), True),
             metrics_csv=os.getenv("METRICS_CSV", "metrics.csv").strip(),
+            sync_config_path=os.getenv(
+                "TIME_SYNC_CONFIG", "time_sync.json"
+            ).strip(),
             timesync_host=(
                 os.getenv("TIMESYNC_HOST", "").strip()
                 or os.getenv("OPENHOP_HOST", "127.0.0.1").strip()
