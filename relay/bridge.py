@@ -68,6 +68,12 @@ class Bridge:
         self._proptest_idx: Optional[int] = None
         self._probes = ProbeLog(config.proptest_log)
         self._probe_seq = 0
+        # Kept on the bridge, not the task, so the schedule and the
+        # counters survive the session being rebuilt.
+        self._last_beacon: Optional[float] = None
+        self._probes_sent = 0
+        self._probes_heard = 0
+        self._logged_unknown_idx: set = set()
         self._probe_task: Optional[asyncio.Task] = None
         self._wardrivers = WardriverLog(config.wardriving_log_file)
         self._wardriving_re = (
@@ -89,6 +95,7 @@ class Bridge:
                 sync_config_path=config.sync_config_path,
                 proptest_log=config.proptest_log,
                 proptest_interval=config.proptest_interval,
+                proptest_status=self.proptest_status,
             )
             if config.commands_enabled
             else None
@@ -422,6 +429,24 @@ class Bridge:
         if not text:
             return
 
+        # Which indices we care about, logged the first time each unexpected
+        # index shows up. Without this, "nothing happened" can't be told apart
+        # from "arrived on a channel we weren't watching".
+        if idx not in self._known_channel_idx():
+            if idx not in self._logged_unknown_idx:
+                self._logged_unknown_idx.add(idx)
+                log.info(
+                    "Channel message on index %r, which isn't one we watch "
+                    "(relay=%r wardriving=%r proptest=%r): %r",
+                    idx,
+                    self._channel_idx,
+                    self._wardriving_idx,
+                    self._proptest_idx,
+                    text[:60],
+                )
+        else:
+            log.debug("Channel message on index %r: %r", idx, text[:60])
+
         if self._wardriving_idx is not None and idx == self._wardriving_idx:
             await self._on_wardriving_message(text)
             return
@@ -536,6 +561,14 @@ class Bridge:
 
         payload = result.payload
         return payload if isinstance(payload, dict) else {}
+
+    def _known_channel_idx(self) -> set:
+        """Channel indices this relay is actively handling."""
+        return {
+            i
+            for i in (self._channel_idx, self._wardriving_idx, self._proptest_idx)
+            if i is not None
+        }
 
     @property
     def _filtering_by_type(self) -> bool:
@@ -781,20 +814,50 @@ class Bridge:
             cfg.proptest_id,
             cfg.proptest_interval,
         )
+        # Write the header now, so the file existing is evidence the feature
+        # is running rather than something you only learn once a probe lands.
+        self._probes.ensure_file()
+
         if cfg.proptest_interval > 0:
             self._probe_task = asyncio.create_task(
                 self._beacon_loop(), name="proptest-beacon"
             )
 
+    def proptest_status(self) -> dict:
+        """Live state, so /proptest can say why it has nothing to show."""
+        return {
+            "enabled": self._cfg.proptest_enabled,
+            "channel": self._cfg.proptest_channel,
+            "channel_idx": self._proptest_idx,
+            "id": self._cfg.proptest_id,
+            "interval": self._cfg.proptest_interval,
+            "sent": self._probes_sent,
+            "heard": self._probes_heard,
+            "beaconing": self._probe_task is not None
+            and not self._probe_task.done(),
+        }
+
     async def _beacon_loop(self) -> None:
+        """Beacon on the probe channel, on a schedule that survives reconnects.
+
+        This task is rebuilt with every mesh session, so it must not wait a
+        full interval before its first send: a link that drops more often than
+        the interval would then never transmit at all. Instead it waits only
+        the remainder of the schedule, tracked across sessions, plus a little
+        jitter so relays coming back from a shared outage don't all transmit
+        at once.
+        """
         cfg = self._cfg
         while True:
             try:
-                # Wait first: beaconing the instant we connect would put every
-                # relay's probe on air together after a shared outage.
-                await asyncio.sleep(cfg.proptest_interval)
+                due_in = self._next_beacon_delay()
+                if due_in > 0:
+                    await asyncio.sleep(due_in)
+
                 if self._mesh is None or self._proptest_idx is None:
+                    await asyncio.sleep(1)
                     continue
+
                 self._probe_seq += 1
                 body = format_probe(
                     cfg.proptest_id, self._probe_seq, cfg.proptest_interval
@@ -802,14 +865,31 @@ class Bridge:
                 result = await self._mesh.commands.send_chan_msg(
                     self._proptest_idx, body
                 )
+                # Record the attempt either way: a failed send shouldn't make
+                # the next one fire immediately and hammer the channel.
+                self._last_beacon = time.time()
                 if getattr(result, "type", None) == EventType.ERROR:
                     log.warning("Probe send failed: %s", result.payload)
                 else:
-                    log.debug("Sent probe %s", body)
+                    self._probes_sent += 1
+                    log.info("Sent probe %s", body)
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - keep beaconing regardless
                 log.exception("Probe beacon failed; will retry")
+                await asyncio.sleep(min(30.0, cfg.proptest_interval or 30.0))
+
+    def _next_beacon_delay(self) -> float:
+        """Seconds until the next probe is due."""
+        import random
+
+        interval = self._cfg.proptest_interval
+        if self._last_beacon is None:
+            # First beacon of the process: go soon, but not the instant every
+            # relay's link comes up.
+            return random.uniform(5.0, min(30.0, max(5.0, interval / 4)))
+        elapsed = time.time() - self._last_beacon
+        return max(0.0, interval - elapsed)
 
     def _on_probe(self, payload: dict, text: str) -> None:
         probe = parse_probe(text)
@@ -824,7 +904,14 @@ class Bridge:
             snr=payload.get("SNR"),
             path_len=payload.get("path_len"),
         )
-        log.debug("Heard probe %s#%s", probe.origin, probe.seq)
+        self._probes_heard += 1
+        log.info(
+            "Heard probe from %s (seq %s, SNR %s, %s hop(s))",
+            probe.origin,
+            probe.seq,
+            payload.get("SNR"),
+            payload.get("path_len"),
+        )
 
     # --- wardriving -------------------------------------------------------
 

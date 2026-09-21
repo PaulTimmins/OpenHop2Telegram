@@ -227,6 +227,7 @@ class CommandRouter:
         sync_config_path: str = "time_sync.json",
         proptest_log: str = "proptest.csv",
         proptest_interval: float = 300.0,
+        proptest_status: Any = None,
         request_timeout: float = 30.0,
     ):
         self._store = store
@@ -236,6 +237,7 @@ class CommandRouter:
         self._sync_config_path = sync_config_path
         self._proptest_log = proptest_log
         self._proptest_interval = proptest_interval
+        self._proptest_status = proptest_status
         self._timeout = request_timeout
 
     async def handle(self, text: str) -> bool:
@@ -469,12 +471,39 @@ class CommandRouter:
         rows = ProbeLog(self._proptest_log).rows(hours=hours)
         results = summarise(rows, fallback_interval=self._proptest_interval)
         if not results:
-            await self._say(
-                f"No probes heard in the last {hours:g}h.\n"
-                f"Propagation testing needs PROPTEST_ENABLED=true and a "
-                f"channel named in PROPTEST_CHANNEL, present on every relay "
-                f"with the same key."
-            )
+            lines = [f"No probes heard in the last {hours:g}h."]
+            status = self._proptest_status() if self._proptest_status else None
+            if isinstance(status, dict):
+                # Report the live state so it's clear which half is failing:
+                # ours transmitting, or ours receiving.
+                lines.append(
+                    f"\nThis relay: id {status.get('id')!r}, channel "
+                    f"{status.get('channel')!r} "
+                    f"(index {status.get('channel_idx')})"
+                )
+                lines.append(
+                    f"  enabled: {status.get('enabled')}   "
+                    f"beaconing: {status.get('beaconing')}"
+                )
+                lines.append(
+                    f"  probes sent this session: {status.get('sent')}   "
+                    f"heard: {status.get('heard')}"
+                )
+                if not status.get("enabled"):
+                    lines.append("\nSet PROPTEST_ENABLED=true to turn it on.")
+                elif status.get("channel_idx") is None:
+                    lines.append(
+                        "\nThe channel isn't resolved, so nothing can be sent "
+                        "or heard on it."
+                    )
+                elif status.get("sent") and not status.get("heard"):
+                    lines.append(
+                        "\nWe're transmitting but hearing nothing. Either no "
+                        "other relay is beaconing, or this radio isn't "
+                        "receiving theirs — compare with /proptest on another "
+                        "relay."
+                    )
+            await self._say("\n".join(lines))
             return
 
         lines = [f"📶 Probe delivery, last {hours:g}h"]

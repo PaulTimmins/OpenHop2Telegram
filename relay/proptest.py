@@ -89,6 +89,18 @@ class ProbeLog:
     def __init__(self, path: str | os.PathLike[str]):
         self._path = Path(path)
 
+    def ensure_file(self) -> None:
+        """Create the log with its header if it isn't there yet."""
+        try:
+            if self._path.exists() and self._path.stat().st_size > 0:
+                return
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            with self._path.open("a", newline="", encoding="utf-8") as fh:
+                csv.DictWriter(fh, fieldnames=COLUMNS).writeheader()
+            log.info("Probe log ready at %s", self._path)
+        except OSError as exc:
+            log.warning("Could not create %s: %s", self._path, exc)
+
     def record(
         self,
         probe: Probe,
