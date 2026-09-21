@@ -101,7 +101,19 @@ later upgraded to a supergroup its id changes, so `.env` needs updating.
 python -m relay
 ```
 
-You should see `Relay online` posted in the Telegram chat once it connects.
+Each relay posts a status line to the chat whenever it connects:
+
+```
+✅ Relay online — magicmirror
+  channel "Public" ↔ this chat (both)
+  tracking 8 node(s); you'll get an alert when a new one appears
+  wardrivers: watching "wardriving"
+  propagation: beaconing "tgmeshtest" every 5m
+```
+
+`RELAY_NAME` sets the name (default: the hostname). It matters when several
+relays report into one chat, since otherwise nothing tells them apart — the
+reconnect and lost-node notices carry it too.
 
 Run it under a process manager to keep it alive (see below). The MeshCore client
 is started with auto-reconnect enabled.
@@ -671,6 +683,10 @@ node's existing contact list is recorded silently, since announcing every
 contact the radio already knows would be a burst of useless alerts. You get a
 single `🗂 Tracking N known node(s)` summary instead; set
 `ANNOUNCE_SEED_SUMMARY=false` to suppress even that.
+
+The `🗂 Tracking N known node(s)` line that accompanies it is a **one-off**,
+explaining why that first batch was silent. The per-connection status above
+reports the count every time, on every relay.
 
 That silent pass happens **only** on an empty store. On every later start or
 reconnect, a contact with no record in the store is genuinely news — it

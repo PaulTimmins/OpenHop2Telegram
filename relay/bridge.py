@@ -361,12 +361,44 @@ class Bridge:
         if self._tg is None:
             return
         if first:
-            await self._tg.send_message(
-                f"✅ Relay online — bridging mesh channel "
-                f"“{self._cfg.channel_name}” ↔ this chat."
-            )
+            # Reported on every start, not just the first ever run, so each
+            # relay says what it is and what it knows. With several relays in
+            # one chat this is the only thing distinguishing them.
+            await self._tg.send_message(self._status_report())
         elif self._cfg.notify_connection_events:
-            await self._tg.send_message("✅ Reconnected to the mesh node.")
+            await self._tg.send_message(
+                f"✅ {self._cfg.relay_name} reconnected to the mesh node."
+            )
+
+    def _status_report(self) -> str:
+        """What this relay is and what it currently knows."""
+        cfg = self._cfg
+        lines = [
+            f"✅ Relay online — {cfg.relay_name}",
+            f"  channel “{cfg.channel_name}” ↔ this chat ({cfg.direction})",
+        ]
+
+        if cfg.notify_new_nodes:
+            count = len(self._seen)
+            broken = getattr(self._seen, "unusable_reason", None)
+            if broken:
+                lines.append("  nodes: store unreadable — alerts unreliable")
+            else:
+                lines.append(
+                    f"  tracking {count} node(s); you'll get an alert when a "
+                    f"new one appears"
+                )
+        else:
+            lines.append("  new-node alerts: off")
+
+        if self._wardriving_idx is not None:
+            lines.append(f"  wardrivers: watching “{cfg.wardriving_channel}”")
+        if self._proptest_idx is not None:
+            lines.append(
+                f"  propagation: beaconing “{cfg.proptest_channel}” every "
+                f"{cfg.proptest_interval / 60:g}m"
+            )
+        return "\n".join(lines)
 
     async def _announce_offline(self, reason: str) -> None:
         # Only the first failure in an outage is reported, so a node that stays
@@ -376,7 +408,8 @@ class Bridge:
         self._announced_offline = True
         if self._cfg.notify_connection_events:
             await self._tg.send_message(
-                f"⚠️ Lost the mesh node ({reason}). Retrying until it's back."
+                f"⚠️ {self._cfg.relay_name} lost the mesh node ({reason}). "
+                f"Retrying until it's back."
             )
 
     # --- mesh -> telegram -------------------------------------------------

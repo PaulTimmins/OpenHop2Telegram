@@ -109,6 +109,7 @@ class Config:
     proptest_interval: float
     proptest_id: str
     proptest_log: str
+    relay_name: str
     # Endpoint the maintenance scripts use. Defaults to the relay's, but can
     # point somewhere else (a second companion port, a proxy, another node) so
     # the scripts don't share the relay's message queue.
@@ -192,6 +193,9 @@ class Config:
                 os.getenv("PROPTEST_ID", "").strip() or _default_probe_id()
             ),
             proptest_log=os.getenv("PROPTEST_LOG", "proptest.csv").strip(),
+            relay_name=(
+                os.getenv("RELAY_NAME", "").strip() or _default_probe_id()
+            ),
             timesync_host=(
                 os.getenv("TIMESYNC_HOST", "").strip()
                 or os.getenv("OPENHOP_HOST", "127.0.0.1").strip()
