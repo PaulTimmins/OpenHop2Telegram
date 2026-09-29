@@ -65,6 +65,8 @@ All configuration is via environment variables (or a `.env` file). See
 | `WARDRIVING_CHANNEL` | Channel to watch | `wardriving` |
 | `WARDRIVING_QUIET_SECONDS` | Only alert after this much silence from them | `3600` |
 | `SEND_LOCATION_PINS` | Follow located alerts with a Telegram map pin | `true` |
+| `PUBLISH_COMMANDS` | Register the command list with Telegram on startup | `true` |
+| `ADVERT_COOLDOWN` | Seconds before `/advert` will transmit again | `60` |
 | `TIMESYNC_HOST` / `TIMESYNC_PORT` | Endpoint the maintenance scripts use | falls back to `OPENHOP_*` |
 | `RECONNECT_MIN_DELAY` / `RECONNECT_MAX_DELAY` | Reconnect backoff bounds (seconds) | `5` / `300` |
 | `HEALTHCHECK_INTERVAL` | Liveness probe + keepalive interval; `0` disables | `45` |
@@ -176,6 +178,7 @@ Answered in the configured chat:
 | `/telemetry <node>` | Ask a node for a live status + telemetry reading. |
 | `/ping <node>` | Whether it answers, how long it took, and how it's routed. |
 | `/traceroute <node>` | The route there, hop by hop with per-hop SNR. `/trace` also works. |
+| `/advert [local]` | Transmit an advert — flooded by default, `local` for zero-hop. |
 | `/proptest [hours]` | Probe delivery from each relay over time. `/prop` also works. |
 | `/help` | The list above. |
 
@@ -234,17 +237,34 @@ Commands are handled instead of being relayed, so they never reach the mesh. An
 owns it. Anyone who can post in the chat can run these; set
 `COMMANDS_ENABLED=false` to turn them off.
 
-Register them with [@BotFather](https://t.me/BotFather) (`/setcommands`) to get
-autocomplete in Telegram:
+### Autocomplete registers itself
+
+The command list is **pushed to Telegram on startup**, so BotFather never needs
+updating by hand and autocomplete can't drift from the code. `/help`, the
+dispatcher and the published list all come from one registry in
+[relay/commands.py](relay/commands.py) — adding a command there is the only
+edit needed.
+
+Aliases (`/trace`, `/prop`) and `/start` work but aren't published: Telegram
+already shows `/start` for every bot, and duplicates only clutter the menu.
+
+Registration failing is harmless — the commands still work when typed — and
+`PUBLISH_COMMANDS=false` disables it if you'd rather curate the menu yourself.
+
+### /advert
+
+Transmits an advert on demand, which is what you want after moving an antenna
+or bringing a node up, rather than waiting for its own schedule:
 
 ```
-nodes - known nodes, newest first
-battery - battery trend from the metrics log
-telemetry - ask a node for a live reading
-ping - is a node reachable, and how fast
-traceroute - the route to a node, hop by hop
-help - list commands
+/advert          # flood — reaches the whole mesh
+/advert local    # zero-hop — direct neighbours only
 ```
+
+A flood advert is the noisiest thing this bot can do, so `ADVERT_COOLDOWN`
+(default 60s) guards against a double tap; it tells you how long is left rather
+than silently ignoring the second one. A failed advert doesn't consume the
+cooldown.
 
 ## Telegram → mesh splitting
 

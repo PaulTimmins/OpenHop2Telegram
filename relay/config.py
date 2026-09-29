@@ -129,6 +129,8 @@ class Config:
     lock_dir: str
     commands_enabled: bool
     metrics_csv: str
+    publish_commands: bool
+    advert_cooldown: float
     sync_config_path: str
     proptest_enabled: bool
     proptest_channel: str
@@ -225,6 +227,8 @@ class Config:
             lock_dir=os.getenv("LOCK_DIR", ".").strip() or ".",
             commands_enabled=_parse_bool(os.getenv("COMMANDS_ENABLED", ""), True),
             metrics_csv=os.getenv("METRICS_CSV", "metrics.csv").strip(),
+            publish_commands=_parse_bool(os.getenv("PUBLISH_COMMANDS", ""), True),
+            advert_cooldown=float(os.getenv("ADVERT_COOLDOWN", "60")),
             sync_config_path=os.getenv(
                 "TIME_SYNC_CONFIG", "time_sync.json"
             ).strip(),

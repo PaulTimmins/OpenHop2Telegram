@@ -11,7 +11,9 @@ import asyncio
 import csv
 import io
 import logging
+import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -31,15 +33,89 @@ except Exception:  # pragma: no cover
 
 _SPARK = "▁▂▃▄▅▆▇█"
 
-HELP = """Available commands:
+@dataclass(frozen=True)
+class Command:
+    """One slash command.
 
-/nodes [filter] — known nodes, newest adverts first
-/battery [node] [days] — battery trend from the metrics log
-/telemetry <node> — ask a node for a live reading
-/ping <node> — is it reachable, and how long does it take
-/traceroute <node> — the route there, hop by hop with SNR
-/proptest [hours] — probe delivery from each relay (default 24h)
-/help — this list"""
+    Single source of truth: dispatch, /help and the list published to Telegram
+    are all derived from this, so they can't drift apart.
+    """
+
+    name: str
+    handler: str
+    summary: str          # also the description Telegram shows; keep it short
+    usage: str = ""       # argument hint, for /help only
+    alias_of: str = ""    # aliases work but aren't published
+
+    @property
+    def is_alias(self) -> bool:
+        return bool(self.alias_of)
+
+
+COMMANDS: tuple[Command, ...] = (
+    Command("nodes", "_nodes", "known nodes, newest adverts first", "[filter]"),
+    Command("battery", "_battery", "battery trend from the metrics log",
+            "[node] [days]"),
+    Command("telemetry", "_telemetry", "ask a node for a live reading", "<node>"),
+    Command("ping", "_ping", "is a node reachable, and how fast", "<node>"),
+    Command("traceroute", "_traceroute", "the route to a node, hop by hop",
+            "<node>"),
+    Command("advert", "_advert", "send a flood advert from this node",
+            "[local]"),
+    Command("proptest", "_proptest", "probe delivery from each relay",
+            "[hours]"),
+    Command("help", "_help", "list commands"),
+    # Aliases and /start answer, but aren't published: Telegram shows /start
+    # for every bot already, and duplicate entries just clutter autocomplete.
+    Command("trace", "_traceroute", "alias for /traceroute", alias_of="traceroute"),
+    Command("prop", "_proptest", "alias for /proptest", alias_of="proptest"),
+    Command("start", "_help", "alias for /help", alias_of="help"),
+)
+
+# Telegram's rules for a published command name.
+_TG_NAME_RE = re.compile(r"^[a-z0-9_]{1,32}$")
+
+
+def help_text() -> str:
+    """The /help body, built from the registry."""
+    lines = ["Available commands:", ""]
+    for command in COMMANDS:
+        if command.is_alias:
+            continue
+        args = f" {command.usage}" if command.usage else ""
+        lines.append(f"/{command.name}{args} — {command.summary}")
+    aliases = [c for c in COMMANDS if c.is_alias and c.name != "start"]
+    if aliases:
+        lines.append("")
+        lines.append(
+            "Also: " + ", ".join(f"/{c.name} (= /{c.alias_of})" for c in aliases)
+        )
+    return "\n".join(lines)
+
+
+def published_commands() -> list[dict]:
+    """The list to register with Telegram, in its expected shape.
+
+    Aliases are left out, and anything that would be rejected is dropped here
+    rather than failing the whole registration.
+    """
+    out = []
+    for command in COMMANDS:
+        if command.is_alias:
+            continue
+        if not _TG_NAME_RE.match(command.name):
+            log.warning("Not publishing %r: invalid command name", command.name)
+            continue
+        description = command.summary.strip().replace("\n", " ")[:256]
+        if not description:
+            continue
+        out.append({"command": command.name, "description": description})
+    return out
+
+
+HELP = help_text()
+
+_BY_NAME = {c.name: c for c in COMMANDS}
 
 
 def sparkline(values: list[float]) -> str:
@@ -240,6 +316,7 @@ class CommandRouter:
         proptest_log: str = "proptest.csv",
         proptest_interval: float = 300.0,
         proptest_status: Any = None,
+        advert_cooldown: float = 60.0,
         request_timeout: float = 30.0,
     ):
         self._store = store
@@ -254,6 +331,8 @@ class CommandRouter:
         self._proptest_log = proptest_log
         self._proptest_interval = proptest_interval
         self._proptest_status = proptest_status
+        self._advert_cooldown = advert_cooldown
+        self._last_advert = 0.0
         self._timeout = request_timeout
 
     async def handle(self, text: str) -> bool:
@@ -266,18 +345,8 @@ class CommandRouter:
         name = word.split("@", 1)[0].strip().lower()
         args = rest.strip()
 
-        handler = {
-            "help": self._help,
-            "start": self._help,
-            "nodes": self._nodes,
-            "battery": self._battery,
-            "telemetry": self._telemetry,
-            "ping": self._ping,
-            "traceroute": self._traceroute,
-            "trace": self._traceroute,
-            "proptest": self._proptest,
-            "prop": self._proptest,
-        }.get(name)
+        command = _BY_NAME.get(name)
+        handler = getattr(self, command.handler, None) if command else None
 
         if handler is None:
             # Unknown commands are left alone: another bot in the group may own
@@ -548,6 +617,55 @@ class CommandRouter:
             "be either end of the link."
         )
         await self._say("\n".join(lines))
+
+    # --- /advert ------------------------------------------------------------
+
+    async def _advert(self, args: str) -> None:
+        """Transmit an advert, flooded by default.
+
+        A flood advert reaches the whole mesh, which is the point when you've
+        just moved an antenna, but it is also the noisiest thing this bot can
+        do — hence the cooldown against a double tap.
+        """
+        mesh = self._mesh()
+        if mesh is None:
+            await self._say("⚠️ The mesh node is offline right now.")
+            return
+
+        wants_local = args.strip().lower() in ("local", "direct", "zero", "zerohop")
+        flood = not wants_local
+
+        since = time.monotonic() - self._last_advert
+        if self._last_advert and since < self._advert_cooldown:
+            await self._say(
+                f"⏳ An advert went out {since:.0f}s ago. Wait "
+                f"{self._advert_cooldown - since:.0f}s more, or lower "
+                f"ADVERT_COOLDOWN."
+            )
+            return
+
+        send = getattr(getattr(mesh, "commands", None), "send_advert", None)
+        if send is None:
+            await self._say("⚠️ This meshcore version can't send adverts.")
+            return
+
+        kind = "flood" if flood else "local (zero-hop)"
+        try:
+            result = await asyncio.wait_for(send(flood=flood), timeout=self._timeout)
+        except Exception as exc:  # noqa: BLE001
+            await self._say(f"⚠️ Advert failed: {exc}")
+            return
+
+        if getattr(result, "type", None) == EVENT_ERROR:
+            await self._say(f"⚠️ The node refused the advert: {result.payload}")
+            return
+
+        self._last_advert = time.monotonic()
+        log.info("Sent a %s advert on request", kind)
+        await self._say(
+            f"📢 Sent a {kind} advert."
+            + ("" if flood else " Only direct neighbours will hear it.")
+        )
 
     # --- /ping ------------------------------------------------------------
 

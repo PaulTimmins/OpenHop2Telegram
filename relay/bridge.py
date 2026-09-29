@@ -11,7 +11,7 @@ from typing import Optional
 from meshcore import MeshCore, EventType
 
 from .config import NODE_TYPES, Config
-from .commands import CommandRouter
+from .commands import CommandRouter, published_commands
 from .coordination import Coordinator
 from .nodes import SeenNodes, describe, type_code
 from .proptest import ProbeLog, format_probe, parse_probe
@@ -102,6 +102,7 @@ class Bridge:
                 proptest_log=config.proptest_log,
                 proptest_interval=config.proptest_interval,
                 proptest_status=self.proptest_status,
+                advert_cooldown=config.advert_cooldown,
             )
             if config.commands_enabled
             else None
@@ -117,6 +118,10 @@ class Bridge:
         if self._commands is not None:
             self._commands._tg = self._tg
             log.info("Slash commands enabled (/help for the list)")
+            if cfg.publish_commands:
+                # Keeps Telegram's autocomplete in step with the code, so the
+                # list never has to be pasted into BotFather by hand.
+                await self._tg.set_my_commands(published_commands())
 
         # Lets maintenance tools tell that a relay is holding the node.
         self._coord.write_pid()

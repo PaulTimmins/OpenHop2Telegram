@@ -71,6 +71,22 @@ class TelegramClient:
         """Verify the token; returns the bot's own account info."""
         return await self._call("getMe")
 
+    async def set_my_commands(self, commands: list[dict]) -> bool:
+        """Register the command list so Telegram offers autocomplete.
+
+        Saves keeping BotFather in step by hand. Failure is not fatal: the
+        commands still work when typed, they just aren't suggested.
+        """
+        if not commands:
+            return False
+        try:
+            await self._call("setMyCommands", json={"commands": commands})
+            log.info("Registered %d command(s) with Telegram", len(commands))
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Could not register commands (%s); typing them still works", exc)
+            return False
+
     async def send_message(self, text: str) -> None:
         """Send text, splitting it across messages if it exceeds the limit."""
         parts = split_message(text)
