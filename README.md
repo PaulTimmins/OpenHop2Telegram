@@ -50,7 +50,8 @@ All configuration is via environment variables (or a `.env` file). See
 | `OPENHOP_HOST` / `OPENHOP_PORT` | MeshCore TCP companion address | `127.0.0.1` / `4000` |
 | `MESH_CHANNEL_NAME` | Channel to relay, resolved by name | `General` |
 | `MESH_CHANNEL_INDEX` | Fallback index if the name can't be resolved | `0` |
-| `PATH_HASH_BYTES` | Mesh path hash width (`1`/`2`/`4`/`8`); also key-prefix width | `2` |
+| `PATH_HASH_BYTES` | Mesh path hash width (`1`–`4`), written to the radio | `2` |
+| `SET_PATH_HASH_MODE` | Apply that width to the node on connect | `true` |
 | `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather | — |
 | `TELEGRAM_CHAT_ID` | Target chat/group/channel id | — |
 | `RELAY_DIRECTION` | `both`, `mesh_to_tg`, or `tg_to_mesh` | `both` |
@@ -204,10 +205,9 @@ a refused login never stops the reading, and the reply is tagged `[admin]`,
 directly, over a stored route, or by flood. It doesn't log in at all.
 
 `/traceroute` sends a trace along the node's stored route and reports each hop
-with the SNR it heard. Hops are sized by `PATH_HASH_BYTES` — your mesh's path
-hash width, 1, 2, 4 or 8 bytes, default 2 — and that same width is used for
-every key prefix shown, so a hop in a trace can be matched against a node in
-`/nodes`:
+with the SNR it heard. Hops are sized by `PATH_HASH_BYTES` — see
+[Path hash width](#path-hash-width) — and that same width is used for every key
+prefix shown, so a hop in a trace can be matched against a node in `/nodes`:
 
 ```
 🛣 PaulHouse Repeater (ceac)
@@ -219,7 +219,30 @@ every key prefix shown, so a hop in a trace can be matched against a node in
 A route already stored on the node is always split using the width that
 contact's own record reports — splitting it at any other width would produce
 nonsense hops — and the trace flags are set to match, so the node uses the same
-size. `PATH_HASH_BYTES` is the default for requests and for display. If there's no stored route — a flood contact — it asks
+size.
+
+## Path hash width
+
+`PATH_HASH_BYTES` (default `2`) is your mesh's path hash width, and it is
+**written to the radio** on every connect — not just used locally. The width the
+node is set to is what goes into **adverts**, contact records and messages, so
+setting it here means every relay agrees without visiting each radio.
+
+Valid values are **1, 2, 3 or 4**. The node stores it as a two-bit mode where
+the width is `mode + 1`, so 2 bytes is mode 1. (Trace flags encode the same idea
+as `1 << s`, a different scheme — the two are converted separately, which is why
+`8` isn't offered here even though a trace could express it.)
+
+The value is read back after writing: a node that accepts the command but keeps
+its old width is reported rather than assumed, since adverts would otherwise
+keep going out at the wrong size while the log claimed success.
+
+```
+Set the node to 2 byte path hashes (mode 1, was 0)
+```
+
+`SET_PATH_HASH_MODE=false` leaves the node's own setting alone and uses the
+value only for traces and display. If there's no stored route — a flood contact — it asks
 the mesh to discover one and tells you what it found, so a second
 `/traceroute` can then measure it.
 

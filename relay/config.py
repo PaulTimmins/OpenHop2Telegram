@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Optional
 
 try:
     from dotenv import load_dotenv
@@ -14,12 +15,15 @@ except ImportError:  # python-dotenv is optional at runtime
 
 DIRECTIONS = {"both", "mesh_to_tg", "tg_to_mesh"}
 
-# MeshCore sizes a path hop hash at 1, 2, 4 or 8 bytes, selected by the low two
-# bits of the trace flags (1 << s). It's a property of how the mesh is set up,
-# so it's configured once and used for both the hops in a trace and the width
-# of key prefixes shown, which lets a hop in /traceroute be matched against a
-# node in /nodes.
-PATH_HASH_BYTES_ALLOWED = (1, 2, 4, 8)
+# MeshCore carries the path hash width as the top two bits of the path-length
+# byte, so the node's mode is 0-3 and the width is mode + 1 bytes: 1, 2, 3 or 4.
+# (Trace flags encode the same idea differently, as 1 << s, which is why the
+# two are converted separately below rather than shared.)
+PATH_HASH_BYTES_ALLOWED = (1, 2, 3, 4)
+
+# bytes -> send_trace flags. 3 bytes has no flag encoding, so a trace there
+# lets the library infer the width from the path instead.
+_TRACE_FLAG_FOR_BYTES = {1: 0, 2: 1, 4: 2}
 
 
 def _parse_path_hash_bytes(raw: str) -> int:
@@ -35,9 +39,18 @@ def _parse_path_hash_bytes(raw: str) -> int:
         )
     if value not in PATH_HASH_BYTES_ALLOWED:
         raise SystemExit(
-            f"PATH_HASH_BYTES must be one of {PATH_HASH_BYTES_ALLOWED}, got {value}"
+            f"PATH_HASH_BYTES must be one of {PATH_HASH_BYTES_ALLOWED}, got {value}. "
+            f"The node encodes this in two bits, so the width is mode + 1 bytes."
         )
     return value
+
+
+def _default_probe_id() -> str:
+    """Identify this relay in probes. The hostname is unique enough locally."""
+    import socket
+
+    return socket.gethostname().split(".")[0][:24] or "relay"
+
 
 # Contact type codes used by MeshCore, plus friendly aliases accepted in config.
 NODE_TYPES = {"NONE", "CLI", "REP", "ROOM", "SENS"}
@@ -51,13 +64,6 @@ NODE_TYPE_ALIASES = {
     "roomserver": "ROOM",
     "sensor": "SENS",
 }
-
-
-def _default_probe_id() -> str:
-    """Identify this relay in probes. The hostname is unique enough locally."""
-    import socket
-
-    return socket.gethostname().split(".")[0][:24] or "relay"
 
 
 def _parse_bool(value: str, default: bool) -> bool:
@@ -130,6 +136,7 @@ class Config:
     commands_enabled: bool
     metrics_csv: str
     publish_commands: bool
+    set_path_hash_mode: bool
     advert_cooldown: float
     sync_config_path: str
     proptest_enabled: bool
@@ -153,9 +160,14 @@ class Config:
         return self.path_hash_bytes * 2
 
     @property
-    def trace_flags(self) -> int:
-        """send_trace flags encoding this hash width (1 << s)."""
-        return PATH_HASH_BYTES_ALLOWED.index(self.path_hash_bytes)
+    def path_hash_mode(self) -> int:
+        """The node's own setting: width is mode + 1 bytes."""
+        return self.path_hash_bytes - 1
+
+    @property
+    def trace_flags(self) -> Optional[int]:
+        """send_trace flags for this width, or None when it has no encoding."""
+        return _TRACE_FLAG_FOR_BYTES.get(self.path_hash_bytes)
 
     @property
     def relay_mesh_to_tg(self) -> bool:
@@ -228,6 +240,9 @@ class Config:
             commands_enabled=_parse_bool(os.getenv("COMMANDS_ENABLED", ""), True),
             metrics_csv=os.getenv("METRICS_CSV", "metrics.csv").strip(),
             publish_commands=_parse_bool(os.getenv("PUBLISH_COMMANDS", ""), True),
+            set_path_hash_mode=_parse_bool(
+                os.getenv("SET_PATH_HASH_MODE", ""), True
+            ),
             advert_cooldown=float(os.getenv("ADVERT_COOLDOWN", "60")),
             sync_config_path=os.getenv(
                 "TIME_SYNC_CONFIG", "time_sync.json"

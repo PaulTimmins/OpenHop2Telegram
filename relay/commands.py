@@ -787,12 +787,16 @@ class CommandRouter:
 
         tag = random.randint(1, 0xFFFFFFFF)
         # Pass flags explicitly rather than letting them be inferred, so the
-        # width the node uses is the width these hops actually are.
-        flags = {1: 0, 2: 1, 4: 2, 8: 3}.get(hash_bytes, 1)
+        # width the node uses is the width these hops actually are. Trace flags
+        # encode the width as 1 << s, which can't express 3 bytes; there the
+        # library infers it from the path instead.
+        flags = {1: 0, 2: 1, 4: 2}.get(hash_bytes)
+        kwargs = {"tag": tag, "path": ",".join(hops)}
+        if flags is not None:
+            kwargs["flags"] = flags
         try:
             sent = await asyncio.wait_for(
-                send(tag=tag, path=",".join(hops), flags=flags),
-                timeout=self._timeout,
+                send(**kwargs), timeout=self._timeout
             )
         except Exception as exc:  # noqa: BLE001
             log.debug("%s: trace could not be sent: %s", name, exc)

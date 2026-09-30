@@ -226,6 +226,9 @@ class Bridge:
 
         self._mesh.subscribe(EventType.DISCONNECTED, self._on_disconnected)
 
+        if cfg.set_path_hash_mode:
+            await self._apply_path_hash_mode()
+
         self._channel_idx = await self._resolve_channel_index()
         log.info(
             "Relaying channel %r (index %d)  [%s]",
@@ -268,6 +271,79 @@ class Bridge:
 
         # Auto-fetch pulls queued messages off the node and emits *_MSG_RECV events.
         await self._mesh.start_auto_message_fetching()
+
+    async def _apply_path_hash_mode(self) -> None:
+        """Put the radio on the configured path hash width.
+
+        This is a node setting, not something the client can decide per packet:
+        adverts, contacts and messages all carry the width the node is set to.
+        Configuring it here means every relay agrees without visiting each
+        radio, and it's what makes adverts go out at the intended width.
+
+        The node stores it as a two-bit mode where the width is mode + 1 bytes,
+        which is a different encoding from the trace flags — hence the separate
+        conversion.
+        """
+        assert self._mesh is not None
+        cfg = self._cfg
+        commands = self._mesh.commands
+
+        setter = getattr(commands, "set_path_hash_mode", None)
+        if setter is None:
+            log.warning("This meshcore version can't set the path hash mode")
+            return
+
+        wanted = cfg.path_hash_mode
+        current = None
+        getter = getattr(commands, "get_path_hash_mode", None)
+        if getter is not None:
+            try:
+                current = await getter()
+            except Exception as exc:  # noqa: BLE001
+                log.debug("Could not read the current path hash mode: %s", exc)
+
+        if current == wanted:
+            log.info(
+                "Node is already using %d byte path hashes (mode %d)",
+                cfg.path_hash_bytes,
+                wanted,
+            )
+            return
+
+        try:
+            result = await setter(wanted)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Could not set the path hash mode: %s", exc)
+            return
+        if getattr(result, "type", None) == EventType.ERROR:
+            log.warning("Node refused the path hash mode: %s", result.payload)
+            return
+
+        # Read it back: a node that accepts the command but ignores it would
+        # otherwise look configured while still transmitting at the old width.
+        confirmed = None
+        if getter is not None:
+            try:
+                confirmed = await getter()
+            except Exception:  # noqa: BLE001
+                confirmed = None
+
+        if confirmed is not None and confirmed != wanted:
+            log.warning(
+                "Asked for %d byte path hashes (mode %d) but the node reports "
+                "mode %s. Adverts will keep using its width, not ours.",
+                cfg.path_hash_bytes,
+                wanted,
+                confirmed,
+            )
+            return
+
+        log.info(
+            "Set the node to %d byte path hashes (mode %d, was %s)",
+            cfg.path_hash_bytes,
+            wanted,
+            "unknown" if current is None else current,
+        )
 
     async def _await_disconnect(self) -> None:
         """Block until the link drops, polling the node if a health check is on."""
