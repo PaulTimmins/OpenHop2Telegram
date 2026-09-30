@@ -145,6 +145,7 @@ class Config:
     proptest_id: str
     proptest_log: str
     proptest_create_channel: bool
+    proptest_scope: str
     relay_name: str
     send_location_pins: bool
     path_hash_bytes: int
@@ -261,6 +262,7 @@ class Config:
             proptest_create_channel=_parse_bool(
                 os.getenv("PROPTEST_CREATE_CHANNEL", ""), True
             ),
+            proptest_scope=os.getenv("PROPTEST_SCOPE", "").strip(),
             relay_name=(
                 os.getenv("RELAY_NAME", "").strip() or _default_probe_id()
             ),

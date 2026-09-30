@@ -72,6 +72,11 @@ class Bridge:
         # counters survive the session being rebuilt.
         self._last_beacon: Optional[float] = None
         self._probes_sent = 0
+        # Flood scope is a mode on the node, not a per-packet field, so the
+        # beacon has to set it, transmit and put it back. Every other
+        # transmission takes this lock too, or one could slip out mid-window
+        # carrying the beacon's scope.
+        self._send_lock = asyncio.Lock()
         self._probes_heard = 0
         self._logged_unknown_idx: set = set()
         # Anything on the probe channel that wasn't a peer probe, split
@@ -103,6 +108,7 @@ class Bridge:
                 proptest_interval=config.proptest_interval,
                 proptest_status=self.proptest_status,
                 advert_cooldown=config.advert_cooldown,
+                send_lock=self._send_lock,
             )
             if config.commands_enabled
             else None
@@ -823,9 +829,10 @@ class Bridge:
                     await asyncio.sleep(self._cfg.mesh_part_delay)
                 log.info("tg -> mesh: %s", body)
                 try:
-                    result = await mesh.commands.send_chan_msg(
-                        self._channel_idx, body
-                    )
+                    async with self._send_lock:
+                        result = await mesh.commands.send_chan_msg(
+                            self._channel_idx, body
+                        )
                     if getattr(result, "type", None) == EventType.ERROR:
                         failed = str(result.payload)
                         log.warning("Mesh send error: %s", result.payload)
@@ -923,6 +930,7 @@ class Bridge:
             "channel_idx": self._proptest_idx,
             "id": self._cfg.proptest_id,
             "interval": self._cfg.proptest_interval,
+            "scope": self._cfg.proptest_scope or "(node default)",
             "sent": self._probes_sent,
             "heard": self._probes_heard,
             "heard_other": self._probes_heard_other,
@@ -956,9 +964,15 @@ class Bridge:
                 body = format_probe(
                     cfg.proptest_id, self._probe_seq, cfg.proptest_interval
                 )
-                result = await self._mesh.commands.send_chan_msg(
-                    self._proptest_idx, body
-                )
+                async with self._send_lock:
+                    scoped = await self._apply_probe_scope()
+                    try:
+                        result = await self._mesh.commands.send_chan_msg(
+                            self._proptest_idx, body
+                        )
+                    finally:
+                        if scoped:
+                            await self._restore_scope()
                 # Record the attempt either way: a failed send shouldn't make
                 # the next one fire immediately and hammer the channel.
                 self._last_beacon = time.time()
@@ -972,6 +986,51 @@ class Bridge:
             except Exception:  # noqa: BLE001 - keep beaconing regardless
                 log.exception("Probe beacon failed; will retry")
                 await asyncio.sleep(min(30.0, cfg.proptest_interval or 30.0))
+
+    async def _apply_probe_scope(self) -> bool:
+        """Put the node into the configured scope for one probe.
+
+        Returns True when the scope was changed and must be restored. An
+        unset PROPTEST_SCOPE leaves the node alone entirely, so a mesh that
+        manages scope elsewhere isn't second-guessed.
+        """
+        wanted = (self._cfg.proptest_scope or "").strip()
+        if not wanted:
+            return False
+
+        commands = self._mesh.commands if self._mesh else None
+        setter = getattr(commands, "set_flood_scope", None)
+        if setter is None:
+            log.warning("This meshcore version can't set a flood scope")
+            return False
+
+        try:
+            if wanted.lower() in ("*", "unscoped", "none", "off"):
+                forcer = getattr(commands, "force_unscoped", None)
+                result = await (forcer() if forcer else setter("*"))
+            else:
+                result = await setter(wanted)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Could not set the probe scope: %s", exc)
+            return False
+
+        if getattr(result, "type", None) == EventType.ERROR:
+            log.warning("Node refused the probe scope: %s", result.payload)
+            return False
+        return True
+
+    async def _restore_scope(self) -> None:
+        """Put the node back on its own default scope."""
+        commands = self._mesh.commands if self._mesh else None
+        reset = getattr(commands, "reset_flood_scope", None)
+        if reset is None:
+            return
+        try:
+            await reset()
+        except Exception as exc:  # noqa: BLE001
+            # Worth shouting about: the node would otherwise stay scoped and
+            # quietly change how everything else propagates.
+            log.error("Could not restore the flood scope: %s", exc)
 
     def _next_beacon_delay(self) -> float:
         """Seconds until the next probe is due."""

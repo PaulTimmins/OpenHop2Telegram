@@ -375,7 +375,31 @@ PROPTEST_ENABLED=true
 PROPTEST_CHANNEL=tgmeshtest
 PROPTEST_INTERVAL=300
 PROPTEST_ID=            # blank = hostname; set it if hostnames are unhelpful
+PROPTEST_SCOPE=         # blank = the node's own scope; see below
 ```
+
+### Scope
+
+`PROPTEST_SCOPE` controls how far probes are allowed to flood:
+
+| Value | Effect |
+| --- | --- |
+| blank | leave the node's own scope alone — the default |
+| `eastsidemesh` | scope probes to `#eastsidemesh` |
+| `*`, `unscoped`, `none`, `off` | force probes out unscoped |
+
+Scope is a **mode on the node**, not a field on a packet, so the beacon sets
+it, transmits, and puts it straight back. Every other transmission takes the
+same lock, so nothing can slip out mid-window wearing the beacon's scope, and
+the restore runs even if the send fails.
+
+Leaving it blank means a mesh that manages scope elsewhere isn't second-guessed.
+If the node refuses the scope the probe still goes out — under whatever scope
+the node was already using — and says so in the log rather than being dropped.
+
+Scoping probes measures reachability *within* that scope, which is usually what
+you want when comparing relays inside one region. Unscoped probes measure the
+whole mesh and cost correspondingly more airtime.
 
 Then restart. Probes begin shortly after connect, and figures become meaningful
 once each peer has a few hours logged — a single sighting reads as 1/1, i.e.

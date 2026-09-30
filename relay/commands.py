@@ -317,6 +317,7 @@ class CommandRouter:
         proptest_interval: float = 300.0,
         proptest_status: Any = None,
         advert_cooldown: float = 60.0,
+        send_lock: Any = None,
         request_timeout: float = 30.0,
     ):
         self._store = store
@@ -332,6 +333,8 @@ class CommandRouter:
         self._proptest_interval = proptest_interval
         self._proptest_status = proptest_status
         self._advert_cooldown = advert_cooldown
+        # Shared with the beacon, which briefly changes the node's flood scope.
+        self._send_lock = send_lock
         self._last_advert = 0.0
         self._timeout = request_timeout
 
@@ -651,7 +654,15 @@ class CommandRouter:
 
         kind = "flood" if flood else "local (zero-hop)"
         try:
-            result = await asyncio.wait_for(send(flood=flood), timeout=self._timeout)
+            if self._send_lock is not None:
+                async with self._send_lock:
+                    result = await asyncio.wait_for(
+                        send(flood=flood), timeout=self._timeout
+                    )
+            else:
+                result = await asyncio.wait_for(
+                    send(flood=flood), timeout=self._timeout
+                )
         except Exception as exc:  # noqa: BLE001
             await self._say(f"⚠️ Advert failed: {exc}")
             return
