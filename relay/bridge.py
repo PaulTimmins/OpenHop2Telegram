@@ -77,6 +77,9 @@ class Bridge:
         # transmission takes this lock too, or one could slip out mid-window
         # carrying the beacon's scope.
         self._send_lock = asyncio.Lock()
+        # What the node last reported for its path hash mode, so the startup
+        # status can state it rather than assuming the write landed.
+        self._node_path_hash_mode: Optional[int] = None
         self._probes_heard = 0
         self._logged_unknown_idx: set = set()
         # Anything on the probe channel that wasn't a peer probe, split
@@ -309,6 +312,7 @@ class Bridge:
                 log.debug("Could not read the current path hash mode: %s", exc)
 
         if current == wanted:
+            self._node_path_hash_mode = current
             log.info(
                 "Node is already using %d byte path hashes (mode %d)",
                 cfg.path_hash_bytes,
@@ -335,15 +339,26 @@ class Bridge:
                 confirmed = None
 
         if confirmed is not None and confirmed != wanted:
+            self._node_path_hash_mode = confirmed
             log.warning(
                 "Asked for %d byte path hashes (mode %d) but the node reports "
-                "mode %s. Adverts will keep using its width, not ours.",
+                "mode %s. Adverts and path discovery use the node's width, "
+                "not ours, so they will stay at %d byte(s).",
                 cfg.path_hash_bytes,
                 wanted,
                 confirmed,
+                confirmed + 1,
             )
+            if self._tg is not None:
+                await self._tg.send_message(
+                    f"⚠️ {cfg.relay_name}: asked the node for "
+                    f"{cfg.path_hash_bytes}-byte path hashes but it reports "
+                    f"{confirmed + 1}-byte (mode {confirmed}). Adverts and "
+                    f"route discovery will keep using its width."
+                )
             return
 
+        self._node_path_hash_mode = confirmed if confirmed is not None else wanted
         log.info(
             "Set the node to %d byte path hashes (mode %d, was %s)",
             cfg.path_hash_bytes,
@@ -490,6 +505,20 @@ class Bridge:
                 )
         else:
             lines.append("  new-node alerts: off")
+
+        mode = self._node_path_hash_mode
+        if mode is None:
+            lines.append(
+                f"  path hashes: wanted {cfg.path_hash_bytes} byte(s); the node "
+                f"didn't say what it's using"
+            )
+        elif mode == cfg.path_hash_mode:
+            lines.append(f"  path hashes: {mode + 1} byte(s) (mode {mode})")
+        else:
+            lines.append(
+                f"  path hashes: ⚠️ node is on {mode + 1} byte(s) (mode {mode}), "
+                f"not the {cfg.path_hash_bytes} configured"
+            )
 
         if self._wardriving_idx is not None:
             lines.append(f"  wardrivers: watching “{cfg.wardriving_channel}”")

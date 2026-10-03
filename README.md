@@ -233,13 +233,24 @@ the width is `mode + 1`, so 2 bytes is mode 1. (Trace flags encode the same idea
 as `1 << s`, a different scheme — the two are converted separately, which is why
 `8` isn't offered here even though a trace could express it.)
 
-The value is read back after writing: a node that accepts the command but keeps
-its old width is reported rather than assumed, since adverts would otherwise
-keep going out at the wrong size while the log claimed success.
+The value is read back after writing, and the result appears in the startup
+status in the chat as well as the log — a node that accepts the command but
+keeps its old width is reported rather than assumed:
 
 ```
 Set the node to 2 byte path hashes (mode 1, was 0)
 ```
+
+```
+✅ Relay online — klefki
+  path hashes: 2 byte(s) (mode 1)
+```
+
+If the node doesn't take it you get a warning in the chat instead, because
+everything the *node* generates — adverts and route discovery among them — uses
+its width, not the configured one. Firmware builds those with
+`sendFlood(pkt, delay, _prefs.path_hash_mode + 1)`, so a node still on mode 0
+floods at 1 byte however this is set.
 
 `SET_PATH_HASH_MODE=false` leaves the node's own setting alone and uses the
 value only for traces and display. If there's no stored route — a flood contact — it asks
