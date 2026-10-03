@@ -221,6 +221,17 @@ contact's own record reports — splitting it at any other width would produce
 nonsense hops — and the trace flags are set to match, so the node uses the same
 size.
 
+**A route learned before you changed `PATH_HASH_BYTES` is still at the old
+width.** It works, but its hops are the old size, so a trace shows e.g. `ce`
+rather than `abcd`. The trace says so and re-learning fixes it:
+
+```
+/traceroute RogueOne refresh
+```
+
+That forgets the stored route (`reset_path`), re-discovers it, and traces the
+new one — all in the one command. `rediscover` and `relearn` work too.
+
 ## Path hash width
 
 `PATH_HASH_BYTES` (default `2`) is your mesh's path hash width, and it is

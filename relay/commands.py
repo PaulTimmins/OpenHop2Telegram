@@ -59,7 +59,7 @@ COMMANDS: tuple[Command, ...] = (
     Command("telemetry", "_telemetry", "ask a node for a live reading", "<node>"),
     Command("ping", "_ping", "is a node reachable, and how fast", "<node>"),
     Command("traceroute", "_traceroute", "the route to a node, hop by hop",
-            "<node>"),
+            "<node> [refresh]"),
     Command("advert", "_advert", "send a flood advert from this node",
             "[local]"),
     Command("proptest", "_proptest", "probe delivery from each relay",
@@ -738,8 +738,17 @@ class CommandRouter:
             return
 
         target = args.strip()
+        tokens = target.split()
+        refresh = bool(tokens) and tokens[-1].lower() in (
+            "refresh", "rediscover", "new", "relearn"
+        )
+        if refresh:
+            target = " ".join(tokens[:-1]).strip()
+
         if not target:
-            await self._say("Usage: /traceroute <node name or key prefix>")
+            await self._say(
+                "Usage: /traceroute <node name or key prefix> [refresh]"
+            )
             return
 
         resolved = self._resolve(mesh, target)
@@ -747,6 +756,9 @@ class CommandRouter:
             await self._say(f"No node matching {target!r}. Try /nodes.")
             return
         key, contact, name = resolved
+
+        if refresh:
+            contact = await self._relearn_path(mesh, contact, name, key) or contact
 
         hops, hash_bytes = path_hashes(contact, self._path_hash_bytes)
         if not hops:
@@ -770,6 +782,14 @@ class CommandRouter:
             return
 
         lines = [f"🛣 {name} ({key[:self._key_hex]})"]
+        if hash_bytes != self._path_hash_bytes:
+            # The stored route predates a change of path hash width, so it is
+            # traced at the width it was learned with, not the current one.
+            lines.append(
+                f"  (route stored at {hash_bytes}-byte hops, not the "
+                f"{self._path_hash_bytes} now configured — "
+                f"“/traceroute {name} refresh” re-learns it)"
+            )
         nodes = result.get("path") or []
         for index, node in enumerate(nodes, start=1):
             node_hash = node.get("hash")
@@ -783,6 +803,56 @@ class CommandRouter:
         if not nodes:
             lines.append("  (reply carried no hop details)")
         await self._say("\n".join(lines))
+
+    async def _relearn_path(self, mesh: Any, contact: Any, name: str, key: str):
+        """Forget the stored route and discover it again.
+
+        A route learned before the node's path hash width changed is still
+        usable, but it was recorded at the old width — re-learning it is what
+        gets the hops back at the current size.
+        """
+        commands = getattr(mesh, "commands", None)
+        reset = getattr(commands, "reset_path", None)
+        discover = getattr(commands, "send_path_discovery_sync", None)
+        if reset is None or discover is None:
+            await self._say("This meshcore version can't re-learn a route.")
+            return None
+
+        await self._say(f"🔄 Forgetting the stored route to {name} and re-discovering…")
+        try:
+            await asyncio.wait_for(reset(contact), timeout=self._timeout)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("%s: reset_path failed: %s", name, exc)
+
+        try:
+            result = await asyncio.wait_for(discover(contact), timeout=self._timeout)
+        except Exception as exc:  # noqa: BLE001
+            await self._say(f"❌ Route discovery failed: {exc}")
+            return None
+
+        payload = getattr(result, "payload", None) if result is not None else None
+        if not isinstance(payload, dict) or not payload.get("out_path_len"):
+            await self._say(
+                f"❌ No route found to {name} ({key[:self._key_hex]}) — it may only "
+                f"be reachable by flood."
+            )
+            return None
+
+        width = payload.get("out_path_hash_len") or self._path_hash_bytes
+        await self._say(
+            f"✅ Re-learned a {payload['out_path_len']} hop route at "
+            f"{width}-byte hops."
+        )
+
+        # Refresh the cached contact so the trace below uses the new route.
+        try:
+            await mesh.ensure_contacts(follow=True)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("%s: could not refresh contacts: %s", name, exc)
+        contacts = getattr(mesh, "contacts", None)
+        if isinstance(contacts, dict) and key in contacts:
+            return contacts[key]
+        return None
 
     async def _trace(
         self, mesh: Any, hops: list[str], name: str, hash_bytes: int = 2
