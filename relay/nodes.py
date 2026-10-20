@@ -17,6 +17,11 @@ from typing import Any, Optional
 
 log = logging.getLogger("relay.nodes")
 
+# Hearing an advert updates last_seen in memory every time, but persisting that
+# on every advert would rewrite the store constantly for no benefit. Only write
+# once the stored value is this stale.
+_LAST_SEEN_WRITE_INTERVAL = 60.0
+
 # Compared structurally so this module needn't import meshcore just for it.
 try:  # pragma: no cover - trivial import guard
     from meshcore import EventType as _EventType
@@ -406,8 +411,21 @@ class SeenNodes:
         if not pubkey:
             return False
         if pubkey in self._nodes:
-            # Known already, but a fresh advert may carry better details.
-            if contact and self._merge(self._nodes[pubkey], contact, seen_now=heard):
+            # Known already, but a node can be renamed, move, or change type,
+            # so its record is refreshed rather than left at first sighting.
+            record = self._nodes[pubkey]
+            material = (
+                self._merge(record, contact, seen_now=False) if contact else False
+            )
+
+            stale_stamp = False
+            if heard:
+                now = time.time()
+                previous = record.get("last_seen") or 0
+                record["last_seen"] = int(now)
+                stale_stamp = (now - float(previous)) >= _LAST_SEEN_WRITE_INTERVAL
+
+            if material or stale_stamp:
                 self._dirty.add(pubkey)
                 self._save()
             return False

@@ -657,6 +657,10 @@ class Bridge:
         # or they linger in /nodes as permanent "(superseded)" entries.
         self._seen.drop_missing_superseded(contacts)
 
+        for pubkey, contact in contacts.items():
+            if pubkey in self._seen:
+                await self._note_contact(pubkey, contact, heard=False)
+
         unknown = [(k, c) for k, c in contacts.items() if k not in self._seen]
         if unknown:
             log.info(
@@ -711,7 +715,15 @@ class Bridge:
         undetected.
         """
         pubkey = (event.payload or {}).get("public_key") or ""
-        if not pubkey or pubkey in self._seen:
+        if not pubkey:
+            return
+
+        if pubkey in self._seen:
+            # Known node: not news, but it is evidence it's alive and its
+            # details may have changed, so refresh rather than drop it.
+            contacts = getattr(self._mesh, "contacts", None)
+            cached = contacts.get(pubkey) if isinstance(contacts, dict) else None
+            await self._note_contact(pubkey, cached, heard=True)
             return
 
         contact = await self._lookup_contact(pubkey)
@@ -754,6 +766,10 @@ class Bridge:
                         await self._consider_node(
                             pubkey, contact, "contact poll", heard=False
                         )
+                    else:
+                        # This is the fresh copy from the node, so it is where
+                        # a rename is actually noticed.
+                        await self._note_contact(pubkey, contact, heard=False)
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - keep polling regardless
@@ -774,6 +790,28 @@ class Bridge:
         if isinstance(contacts, dict):
             return contacts.get(pubkey)
         return None
+
+    async def _note_contact(self, pubkey: str, contact, *, heard: bool):
+        """Refresh what we know about a node we've already announced.
+
+        Records were previously written once and never touched again, so a
+        node that was renamed kept its old name indefinitely and its "last
+        heard" never moved. A rename is worth saying out loud, since the new
+        name is what every other command will want.
+        """
+        if not pubkey:
+            return
+        before = (self._seen.get(pubkey) or {}).get("name") or ""
+        self._seen.add(pubkey, contact or {}, heard=heard)
+        after = (self._seen.get(pubkey) or {}).get("name") or ""
+
+        if before and after and before != after:
+            log.info("Node %s renamed: %r -> %r", pubkey[:12], before, after)
+            if self._cfg.notify_new_nodes and self._tg is not None:
+                await self._tg.send_message(
+                    f"\u270F\uFE0F Node renamed: {before} → {after} "
+                    f"({pubkey[: self._cfg.key_hex_chars]})"
+                )
 
     async def _consider_node(
         self, pubkey: str, contact: dict, source: str, *, heard: bool = True

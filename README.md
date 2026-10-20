@@ -917,6 +917,19 @@ Older stores were a bare list of keys; those are migrated automatically on first
 load, with names filling in as each node advertises again. Nothing is
 re-announced by the upgrade.
 
+**Records are kept current, not frozen at first sighting.** A node that is
+renamed, moved or changed type has its record refreshed — from its adverts, from
+the periodic contact poll, and at startup — and a rename is announced:
+
+```
+✏️ Node renamed: OldName → NewName (ceac)
+```
+
+Hearing an advert from a known node also moves its `last_seen`, which is what
+`/nodes` orders by and what decides which of two same-named keys is the live
+one. That stamp is held in memory and only written to disk once a minute, so a
+busy mesh doesn't rewrite the store on every advert.
+
 **Duplicate names are pruned.** Reflashing a node gives it a new keypair while
 the operator keeps the same name, so the store ends up with a live entry and a
 dead one — and a lookup by name could hand the clock checker the dead key, which
