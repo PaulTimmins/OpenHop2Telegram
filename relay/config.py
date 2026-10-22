@@ -15,6 +15,14 @@ except ImportError:  # python-dotenv is optional at runtime
 
 DIRECTIONS = {"both", "mesh_to_tg", "tg_to_mesh"}
 
+# Whose name appears in front of a message relayed Telegram -> mesh.
+# "node" is what the companion protocol gives you: the channel-send command
+# has no sender field, so the radio fills one in from its own advert name.
+# "telegram" builds the packet here instead and sends it with the node's raw
+# packet command, which carries the name we put in it -- falling back to
+# "node" on a radio that doesn't implement that command.
+SENDER_MODES = {"telegram", "node"}
+
 # MeshCore carries the path hash width as the top two bits of the path-length
 # byte, so the node's mode is 0-3 and the width is mode + 1 bytes: 1, 2, 3 or 4.
 # (Trace flags encode the same idea differently, as 1 << s, which is why the
@@ -111,6 +119,7 @@ class Config:
     telegram_bot_token: str
     telegram_chat_id: str
     direction: str
+    mesh_sender_mode: str
     tg_to_mesh_prefix: str
     mesh_max_chars: int
     mesh_max_parts: int
@@ -194,6 +203,15 @@ class Config:
                 f"RELAY_DIRECTION must be one of {sorted(DIRECTIONS)}, got {direction!r}"
             )
 
+        sender_mode = (
+            os.getenv("MESH_SENDER_MODE", "").strip().lower() or "telegram"
+        )
+        if sender_mode not in SENDER_MODES:
+            raise SystemExit(
+                f"MESH_SENDER_MODE must be one of {sorted(SENDER_MODES)}, "
+                f"got {sender_mode!r}"
+            )
+
         return cls(
             openhop_host=os.getenv("OPENHOP_HOST", "127.0.0.1").strip(),
             openhop_port=int(os.getenv("OPENHOP_PORT", "4000")),
@@ -202,6 +220,7 @@ class Config:
             telegram_bot_token=require("TELEGRAM_BOT_TOKEN"),
             telegram_chat_id=require("TELEGRAM_CHAT_ID"),
             direction=direction,
+            mesh_sender_mode=sender_mode,
             tg_to_mesh_prefix=os.getenv("TG_TO_MESH_PREFIX", "[tg]"),
             mesh_max_chars=int(os.getenv("MESH_MAX_CHARS", "140")),
             mesh_max_parts=int(os.getenv("MESH_MAX_PARTS", "4")),

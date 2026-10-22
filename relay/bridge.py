@@ -10,6 +10,7 @@ from typing import Optional
 
 from meshcore import MeshCore, EventType
 
+from . import grouptext
 from .config import NODE_TYPES, Config
 from .commands import CommandRouter, published_commands
 from .coordination import Coordinator
@@ -23,26 +24,59 @@ log = logging.getLogger("relay.bridge")
 # How many channel slots to probe when resolving a channel by name.
 _MAX_CHANNEL_SCAN = 16
 
+# CMD_SEND_RAW_PACKET: hand the node a finished packet to transmit verbatim.
+# Sent with no payload it is a harmless capability probe -- a node that has
+# the command complains the frame is too short, one that doesn't says it has
+# never heard of it, and neither transmits anything.
+_CMD_SEND_RAW_PACKET = 0x41
+_ERR_UNSUPPORTED_CMD = 1
+_ERR_ILLEGAL_ARG = 6
 
-def _split_words(text: str, limit: int) -> list[str]:
-    """Break text into pieces of at most `limit`, on word boundaries."""
+# How long one of our own transmissions stays recognisable if it comes back.
+# Generous: a flood can be repeated for a while after it goes out.
+_ECHO_WINDOW = 300.0
+_ECHO_MEMORY = 64
+
+
+def _utf8_len(text: str) -> int:
+    return len(text.encode("utf-8"))
+
+
+def _split_words(text: str, limit: int, measure=len) -> list[str]:
+    """Break text into pieces of at most `limit`, on word boundaries.
+
+    `measure` is how a piece's size is counted: characters by default, or
+    UTF-8 bytes when the caller is working to the on-air limit, which the
+    firmware counts in bytes.
+    """
     words = (text or "").split()
     if not words:
         return [""]
+
+    def _cut(word: str) -> tuple[str, str]:
+        """Split one over-long word at the last position that still fits.
+
+        No measure counts a piece as smaller than its character count, so
+        `limit` characters is where to start looking rather than the end.
+        """
+        for end in range(min(len(word), limit), 0, -1):
+            if measure(word[:end]) <= limit:
+                return word[:end], word[end:]
+        return word[:1], word[1:]
 
     chunks: list[str] = []
     current = ""
     for word in words:
         # A single word longer than the limit has to be cut somewhere.
-        while len(word) > limit:
+        while measure(word) > limit:
             if current:
                 chunks.append(current)
                 current = ""
-            chunks.append(word[:limit])
-            word = word[limit:]
+            head, word = _cut(word)
+            chunks.append(head)
 
         candidate = f"{current} {word}" if current else word
-        if len(candidate) <= limit:
+        if measure(candidate) <= limit:
             current = candidate
         else:
             chunks.append(current)
@@ -80,6 +114,18 @@ class Bridge:
         # What the node last reported for its path hash mode, so the startup
         # status can state it rather than assuming the write landed.
         self._node_path_hash_mode: Optional[int] = None
+        # Whether this node can transmit a packet we built, and the material
+        # needed to build one. Re-established every session: a node can be
+        # upgraded, reconfigured or swapped under a long-running relay.
+        self._raw_send = False
+        self._channel_secret: Optional[bytes] = None
+        self._scope_key: Optional[bytes] = None
+        # On-air lines this relay injected, kept briefly so its own traffic
+        # coming back through the node isn't posted to the chat as though
+        # someone else had said it. The node drops the echo of a message it
+        # composed itself, by remembering the packet hash before transmitting
+        # -- a packet we hand it finished was never registered that way.
+        self._sent_lines: dict[str, float] = {}
         self._probes_heard = 0
         self._logged_unknown_idx: set = set()
         # Anything on the probe channel that wasn't a peer probe, split
@@ -246,6 +292,8 @@ class Bridge:
             cfg.direction,
         )
 
+        await self._setup_raw_sender()
+
         if cfg.wardriving_enabled:
             await self._setup_wardriving()
 
@@ -365,6 +413,223 @@ class Bridge:
             wanted,
             "unknown" if current is None else current,
         )
+
+    # --- putting the sender's own name on the wire -------------------------
+
+    async def _setup_raw_sender(self) -> None:
+        """Decide whether this session can name the sender of a relayed message.
+
+        The companion channel-send command has no sender field: the node
+        labels the message with its own advert name, so everything from
+        Telegram arrives on the mesh under the radio's name rather than the
+        person's. Building the packet here and handing it over finished is
+        the way around that, and it needs three things to be true -- the node
+        implements the raw packet command, we can read the channel's key, and
+        the path hash width is one a packet can carry. Any of them missing
+        and the relay just keeps doing what it did before.
+        """
+        cfg = self._cfg
+        self._raw_send = False
+        self._channel_secret = None
+        self._scope_key = None
+
+        if cfg.mesh_sender_mode != "telegram" or not cfg.relay_tg_to_mesh:
+            return
+
+        if not grouptext.crypto_available():
+            log.warning(
+                "Can't name Telegram senders on the mesh: pycryptodome is "
+                "missing, so a channel packet can't be encrypted here. "
+                "Messages will go out under the radio's name."
+            )
+            return
+
+        if cfg.path_hash_bytes not in grouptext.RAW_PATH_HASH_BYTES:
+            log.warning(
+                "Can't name Telegram senders on the mesh: a packet encodes "
+                "its path hash width in two bits and %d bytes is reserved. "
+                "Messages will go out under the radio's name.",
+                cfg.path_hash_bytes,
+            )
+            return
+
+        if not await self._probe_raw_packet():
+            log.info(
+                "This node has no raw packet command, so relayed messages "
+                "carry its name rather than the Telegram sender's."
+            )
+            return
+
+        secret = await self._fetch_channel_secret()
+        if secret is None:
+            log.warning(
+                "Couldn't read the key for channel %d, so relayed messages "
+                "will go out under the radio's name.",
+                self._channel_idx,
+            )
+            return
+
+        self._channel_secret = secret
+        # A raw packet is transmitted verbatim, so the node applies none of
+        # its own scope to it. Read the default and apply it here, or a
+        # scoped mesh would quietly drop everything this relay sends.
+        self._scope_key = await self._fetch_default_scope()
+        self._raw_send = True
+        log.info(
+            "Relayed messages will carry the Telegram sender's name "
+            "(raw packet send, %d byte path hashes, scope %s)",
+            cfg.path_hash_bytes,
+            self._scope_key.hex()[:8] if self._scope_key else "none",
+        )
+
+    async def _probe_raw_packet(self) -> bool:
+        """Ask the node whether it implements the raw packet command.
+
+        Sends the command with an empty payload, which transmits nothing: a
+        node that has it rejects the frame as too short, one that doesn't
+        rejects the command itself, and the two error codes tell them apart.
+        """
+        assert self._mesh is not None
+        try:
+            result = await self._mesh.commands.send(
+                bytes([_CMD_SEND_RAW_PACKET]), [EventType.OK, EventType.ERROR]
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Raw packet probe failed: %s", exc)
+            return False
+
+        if getattr(result, "type", None) != EventType.ERROR:
+            # Nothing should accept an empty raw packet. Treat a surprise as
+            # a no rather than start transmitting against an unknown node.
+            log.debug("Raw packet probe got an unexpected %s", result)
+            return False
+
+        code = (result.payload or {}).get("error_code")
+        if code == _ERR_ILLEGAL_ARG:
+            return True
+        if code != _ERR_UNSUPPORTED_CMD:
+            log.debug("Raw packet probe got error code %s", code)
+        return False
+
+    async def _fetch_channel_secret(self) -> Optional[bytes]:
+        """Read the relayed channel's key, which we need to encrypt to it."""
+        assert self._mesh is not None
+        try:
+            result = await self._mesh.commands.get_channel(self._channel_idx)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Could not read channel %d: %s", self._channel_idx, exc)
+            return None
+        if getattr(result, "type", None) == EventType.ERROR:
+            log.debug("Node refused to describe channel %d: %s",
+                      self._channel_idx, result.payload)
+            return None
+
+        secret = (result.payload or {}).get("channel_secret")
+        if not isinstance(secret, (bytes, bytearray)) or len(secret) < 16:
+            return None
+        secret = bytes(secret)
+        # An empty slot reports an all-zero key; encrypting to that would
+        # produce a packet nobody can read.
+        if secret == b"\x00" * len(secret):
+            log.debug("Channel %d reports an empty key", self._channel_idx)
+            return None
+        return secret
+
+    async def _fetch_default_scope(self) -> Optional[bytes]:
+        """The node's default flood scope key, or None when it floods plain."""
+        assert self._mesh is not None
+        getter = getattr(self._mesh.commands, "get_default_flood_scope", None)
+        if getter is None:
+            log.debug("This meshcore version can't read the default flood scope")
+            return None
+        try:
+            result = await getter()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Could not read the default flood scope: %s", exc)
+            return None
+        if getattr(result, "type", None) == EventType.ERROR:
+            return None
+
+        raw = (result.payload or {}).get("scope_key")
+        if not raw:
+            return None
+        try:
+            key = bytes.fromhex(raw) if isinstance(raw, str) else bytes(raw)
+        except ValueError:
+            return None
+        if len(key) != 16 or key == b"\x00" * 16:
+            return None
+        return key
+
+    async def _send_named(self, sender: str, text: str) -> Optional[str]:
+        """Transmit one channel message under `sender`.
+
+        Returns None when it went out, or a reason when it didn't. A node
+        that turns out not to support the command after all is demoted so
+        later messages take the ordinary path instead of failing again.
+        """
+        assert self._mesh is not None
+        if self._channel_secret is None:
+            return "no channel key"
+
+        try:
+            packet = grouptext.build(
+                self._channel_secret,
+                sender,
+                text,
+                timestamp=int(time.time()),
+                path_hash_bytes=self._cfg.path_hash_bytes,
+                scope_key=self._scope_key,
+            )
+        except grouptext.Unsupported as exc:
+            return str(exc)
+
+        # Priority byte: the node accepts it for protocol compatibility and
+        # currently ignores it.
+        frame = bytes([_CMD_SEND_RAW_PACKET, 0]) + packet
+        try:
+            async with self._send_lock:
+                result = await self._mesh.commands.send(
+                    frame, [EventType.OK, EventType.ERROR]
+                )
+        except Exception as exc:  # noqa: BLE001
+            return str(exc)
+
+        if getattr(result, "type", None) != EventType.ERROR:
+            self._remember_sent(f"{sender}: {text}")
+            return None
+
+        payload = result.payload or {}
+        if payload.get("error_code") == _ERR_UNSUPPORTED_CMD:
+            self._raw_send = False
+            log.warning(
+                "Node stopped accepting raw packets; relayed messages will "
+                "carry its name from now on."
+            )
+            return "the node stopped accepting raw packets"
+        return str(payload)
+
+    def _remember_sent(self, line: str) -> None:
+        """Note an on-air line we transmitted, so we can recognise its echo."""
+        now = time.time()
+        self._sent_lines[line] = now
+        if len(self._sent_lines) <= _ECHO_MEMORY:
+            return
+        fresh = {
+            text: when
+            for text, when in self._sent_lines.items()
+            if now - when < _ECHO_WINDOW
+        }
+        # Age alone can leave this large if the chat is busy, so the oldest
+        # go too. Losing one means at worst relaying our own line back.
+        self._sent_lines = dict(
+            sorted(fresh.items(), key=lambda item: item[1])[-_ECHO_MEMORY:]
+        )
+
+    def _is_own_echo(self, text: str) -> bool:
+        """Whether this arriving line is one this relay just transmitted."""
+        when = self._sent_lines.get(text)
+        return when is not None and (time.time() - when) < _ECHO_WINDOW
 
     async def _await_disconnect(self) -> None:
         """Block until the link drops, polling the node if a health check is on."""
@@ -520,6 +785,15 @@ class Bridge:
                 f"not the {cfg.path_hash_bytes} configured"
             )
 
+        if cfg.relay_tg_to_mesh:
+            if self._raw_send:
+                lines.append("  outgoing: sent under the Telegram sender's name")
+            elif cfg.mesh_sender_mode == "telegram":
+                lines.append(
+                    "  outgoing: under the radio's name — this node can't send "
+                    "a packet we built"
+                )
+
         if self._wardriving_idx is not None:
             lines.append(f"  wardrivers: watching “{cfg.wardriving_channel}”")
         if self._proptest_idx is not None:
@@ -578,6 +852,10 @@ class Bridge:
             return
 
         if idx != self._channel_idx or not self._cfg.relay_mesh_to_tg:
+            return
+
+        if self._is_own_echo(text):
+            log.debug("Ignoring our own transmission coming back: %r", text[:60])
             return
 
         sender = self._format_sender(payload)
@@ -889,12 +1167,22 @@ class Bridge:
                 parts = parts[:limit]
 
             failed = None
-            for index, body in enumerate(parts):
+            for index, (sender, body) in enumerate(parts):
                 if index:
                     # Space the transmissions out; back to back they hog the
                     # channel and are more likely to collide.
                     await asyncio.sleep(self._cfg.mesh_part_delay)
-                log.info("tg -> mesh: %s", body)
+                log.info("tg -> mesh: %s", f"{sender}: {body}" if sender else body)
+
+                if sender:
+                    # A packet we built, so the name on the wire is the
+                    # Telegram sender's rather than the radio's.
+                    failed = await self._send_named(sender, body)
+                    if failed:
+                        log.warning("Mesh send error: %s", failed)
+                        break
+                    continue
+
                 try:
                     async with self._send_lock:
                         result = await mesh.commands.send_chan_msg(
@@ -922,8 +1210,13 @@ class Bridge:
             elif len(parts) > 1:
                 log.info("Sent as %d parts", len(parts))
 
-    def _format_outgoing(self, message: dict, text: str) -> list[str]:
+    def _format_outgoing(self, message: dict, text: str) -> list[tuple[str, str]]:
         """Build the mesh transmission(s) for one Telegram message.
+
+        Returns (sender, body) per transmission. A sender means this part is
+        going out as a packet we build, with that name on the wire; an empty
+        one means the node is naming the message and the sender has to ride
+        along inside the text instead.
 
         A message too long for a single LoRa payload is split across several
         rather than cut off: half a sentence arriving on the mesh leaves people
@@ -938,24 +1231,51 @@ class Bridge:
             prefix_bits.append(who)
         prefix = " ".join(prefix_bits)
 
+        # With nothing to call the sender there is no name to put on a packet,
+        # and a bare ": text" would be worse than the radio's own name.
+        named = self._raw_send and bool(prefix)
+
         limit = self._cfg.mesh_max_chars
-        single = f"{prefix}: {text}" if prefix else text
-        if len(single) <= limit:
-            return [single]
+        measure = len
+        if named:
+            # The whole on-air line is ours now, so the firmware's own cap
+            # applies directly to it -- and that cap counts bytes.
+            limit = min(limit, grouptext.MAX_TEXT_LEN)
+            measure = _utf8_len
+            if measure(prefix) + 2 >= limit:
+                # A name that leaves no room for words would make every part
+                # fail to build; let the radio handle this one instead.
+                named = False
+                limit = self._cfg.mesh_max_chars
+                measure = len
+
+        def part(head: str, body: str) -> tuple[str, str]:
+            """One transmission, as the chosen sending path wants it."""
+            if named:
+                return (head, body)
+            return ("", f"{head}: {body}" if head else body)
+
+        if measure(text) + (measure(prefix) + 2 if prefix else 0) <= limit:
+            return [part(prefix, text)]
+
+        # Every part of a split carries a head, so the ": " is always paid for
+        # here even when there is no sender to put in front of it.
+        overhead = measure(prefix) + 2
 
         # Reserve room for the widest marker the split could need. Estimated
         # from an initial split, then re-split once the real cost is known.
-        chunks = _split_words(text, max(1, limit - len(prefix) - 10))
-        marker_width = len(f" ({len(chunks)}/{len(chunks)})")
-        room = max(1, limit - len(prefix) - 2 - marker_width)
-        chunks = _split_words(text, room)
+        chunks = _split_words(text, max(1, limit - overhead - 8), measure)
+        marker = measure(f" ({len(chunks)}/{len(chunks)})")
+        chunks = _split_words(text, max(1, limit - overhead - marker), measure)
 
         total = len(chunks)
-        out = []
-        for index, chunk in enumerate(chunks, start=1):
-            head = f"{prefix} ({index}/{total})" if prefix else f"({index}/{total})"
-            out.append(f"{head}: {chunk}")
-        return out
+        return [
+            part(
+                f"{prefix} ({index}/{total})" if prefix else f"({index}/{total})",
+                chunk,
+            )
+            for index, chunk in enumerate(chunks, start=1)
+        ]
 
     # --- propagation testing ----------------------------------------------
 

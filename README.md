@@ -55,6 +55,7 @@ All configuration is via environment variables (or a `.env` file). See
 | `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather | — |
 | `TELEGRAM_CHAT_ID` | Target chat/group/channel id | — |
 | `RELAY_DIRECTION` | `both`, `mesh_to_tg`, or `tg_to_mesh` | `both` |
+| `MESH_SENDER_MODE` | Whose name fronts a relayed message: `telegram` or `node` | `telegram` |
 | `MESH_MAX_CHARS` | Characters per mesh transmission; longer messages split | `140` |
 | `MESH_MAX_PARTS` / `MESH_PART_DELAY` | Cap on parts per message, and spacing | `4` / `3` |
 | `RELAY_NAME` | This relay's name in its own status messages | hostname |
@@ -311,11 +312,62 @@ A flood advert is the noisiest thing this bot can do, so `ADVERT_COOLDOWN`
 than silently ignoring the second one. A failed advert doesn't consume the
 cooldown.
 
+## Who a relayed message comes from
+
+By default a message from Telegram arrives on the mesh under the **sender's
+Telegram name**:
+
+```
+[tg] Paul: heading out, back in an hour
+```
+
+That is not how the companion protocol normally works. Its channel-send
+command carries a channel index, a timestamp and text — there is no sender
+field, so the radio labels the message with its own advert name and you get
+`PaulHouse: [tg] Paul: ...` instead. Nothing a client sends can change that.
+
+What makes the first form possible is `CMD_SEND_RAW_PACKET`: hand the node a
+finished on-air packet and it transmits it verbatim. The relay builds the
+encrypted channel packet itself, with the name it wants on it, and injects
+that. On connect it checks whether the node has the command — by sending it
+with an empty payload, which transmits nothing and simply gets told off — and
+also needs to read the channel's key and have a path hash width a packet can
+carry (1–3 bytes; 4 is reserved on the wire). If any of that doesn't hold it
+goes back to letting the radio name the message, and the startup status says
+which you got:
+
+```
+  outgoing: sent under the Telegram sender's name
+  outgoing: under the radio's name — this node can't send a packet we built
+```
+
+Set `MESH_SENDER_MODE=node` to always let the radio name it. Set
+`TG_TO_MESH_PREFIX=` (empty) to drop the `[tg]` marker and send as plain
+`Paul: ...`.
+
+Two consequences of "verbatim" worth knowing, both handled:
+
+- The node applies **no flood scope** to a packet it didn't build, so the
+  relay reads the node's default scope on connect and applies it itself.
+  Without that, a scoped mesh would drop everything this relay sent.
+- The node suppresses the echo of a message **it** composed, by remembering
+  the packet hash before transmitting. A packet handed to it finished was
+  never registered that way, so the relay remembers its own lines for five
+  minutes and won't post one back into the chat if it comes round again.
+
+The alternative — renaming the radio around each send — was considered and
+rejected: `set_advert_name` persists to the node's config on every call, and
+between the two renames any scheduled advert would introduce your repeater to
+the whole mesh under the wrong name.
+
 ## Telegram → mesh splitting
 
 A message longer than `MESH_MAX_CHARS` is **split across several
 transmissions**, on word boundaries, each carrying the sender and an `(n/m)`
-marker:
+marker. Under `MESH_SENDER_MODE=telegram` the limit is also capped at the
+firmware's own 160-**byte** line limit, and the split is measured in UTF-8
+bytes so a message of multi-byte characters is broken in the right places
+rather than refused:
 
 ```
 [tg] Ann (1/3): the first part of what she said
@@ -1016,8 +1068,10 @@ alert permanently. It fires once the contact details catch up.
 - **mesh → Telegram** — subscribes to `EventType.CHANNEL_MSG_RECV` and forwards
   the text (with a short sender id) via the Telegram `sendMessage` API.
 - **Telegram → mesh** — long-polls `getUpdates`; text messages in the configured
-  chat are sent with `commands.send_chan_msg(idx, text)`. Bot commands
-  (`/…`) are ignored, and only the configured chat is relayed.
+  chat go out either as a packet the relay builds and injects with
+  `CMD_SEND_RAW_PACKET` (so the sender's own name is on the wire) or, where
+  the node has no such command, with `commands.send_chan_msg(idx, text)`.
+  Bot commands (`/…`) are ignored, and only the configured chat is relayed.
 - **New nodes** — seeds a seen-set from `commands.get_contacts()`, then
   subscribes to `EventType.NEW_CONTACT` and announces first sightings.
 - **Reconnection** — a supervisor loop owns the mesh session: it subscribes to
